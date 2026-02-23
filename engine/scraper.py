@@ -1,11 +1,11 @@
 import httpx
 import cloudinary
 import cloudinary.uploader
-from datetime import datetime
 from typing import Optional, List
 from core.config import config
 from core.logger import setup_logger
-
+from datetime import datetime, timedelta
+import httpx
 logger = setup_logger("Scraper")
 
 
