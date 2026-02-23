@@ -23,6 +23,7 @@ class SecondaryEvent(BaseModel):
     source_url: str
     thumbnail_url: Optional[str] = None
     ai_relevance_score: float
+    narrative_translations: Translations
 
 class MainEvent(BaseModel):
     category: EventCategory
