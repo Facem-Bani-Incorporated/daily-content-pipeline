@@ -68,11 +68,14 @@ async def send_to_java(payload: DailyPayload):
 async def main():
     logger.info("🚀 Starting Elite Pipeline (Async Parallel Mode)...")
 
+    # Inițializare DB doar dacă URL-ul există
     if config.DATABASE_URL:
         try:
             await init_db()
         except Exception as e:
             logger.warning(f"⚠️ Database init failed: {e}")
+    else:
+        logger.info("ℹ️ No DATABASE_URL found. Running in DB-less mode.")
 
     try:
         scraper = WikiScraper()
@@ -132,7 +135,6 @@ async def main():
         main_gallery = await asyncio.gather(*main_gallery_tasks)
 
         secondary_objs = []
-        # --- BUCĂȚICA ASTA ERA PROBLEMA (Indentația) ---
         for idx, item in enumerate(candidates[1:6]):
             slug_sec = item.get('slug')
             thumb = None
@@ -150,7 +152,7 @@ async def main():
                 thumbnail_url=thumb
             ))
 
-        # --- STEP 7: PAYLOAD ASSEMBLY (Acum este în afara buclei for) ---
+        # STEP 7: PAYLOAD ASSEMBLY
         payload = DailyPayload(
             date_processed=datetime.now().date(),
             api_secret=config.INTERNAL_API_SECRET,
@@ -167,15 +169,14 @@ async def main():
             secondary_events=secondary_objs
         )
 
-        # --- MINIMALIST INSPECTOR & METRICS ---
+        # --- INSPECTOR LOG ---
         display_payload = payload.model_dump(mode='json')
         payload_size_kb = len(json.dumps(display_payload)) / 1024
         display_payload['api_secret'] = "********HIDDEN********"
 
         for lang in display_payload['main_event']['narrative_translations']:
             text = display_payload['main_event']['narrative_translations'][lang]
-            display_payload['main_event']['narrative_translations'][lang] = text[:100] + "..." if len(
-                text) > 100 else text
+            display_payload['main_event']['narrative_translations'][lang] = text[:100] + "..." if len(text) > 100 else text
 
         print("\n" + "═" * 60)
         print(f"🔍 PAYLOAD INSPECTOR | Size: {payload_size_kb:.2f} KB")
@@ -185,13 +186,16 @@ async def main():
         print("═" * 60 + "\n")
 
         # --- STEP 8: SAVE & TRANSMIT ---
+        # Salvăm backup-ul JSON local (faptul că nu ai DB face acest backup și mai important pentru debug)
         backup_filename = f"backup_{payload.date_processed}.json"
         with open(backup_filename, "w", encoding="utf-8") as f:
             json.dump(payload.model_dump(mode='json'), f, ensure_ascii=False, indent=4)
-        logger.info(f"💾 Emergency backup saved to {backup_filename}")
+        logger.info(f"💾 Local JSON backup saved to {backup_filename}")
 
+        # Salvare în DB (va da skip automat dacă config.DATABASE_URL e None)
         await save_event_content_safe(payload)
 
+        # Ingestie Java
         try:
             status_code = await send_to_java(payload)
             if status_code in [200, 201]:
@@ -201,11 +205,12 @@ async def main():
                     os.remove(backup_filename)
         except Exception as e:
             logger.error(f"❌ Java Ingestion Failed: {e}")
-            logger.warning(f"⚠️ Manual ingestion needed: {backup_filename}")
+            logger.warning(f"⚠️ Check {backup_filename} for the generated content.")
 
     except Exception as e:
         logger.error(f"🚨 Pipeline Crash: {e}", exc_info=True)
     finally:
-        if engine and config.DATABASE_URL:
+        # Dispose engine doar dacă a fost creat
+        if config.DATABASE_URL and engine:
             await engine.dispose()
             logger.info("🔌 DB Connections closed.")
