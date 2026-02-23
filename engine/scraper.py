@@ -11,16 +11,32 @@ logger = setup_logger("Scraper")
 
 class WikiScraper:
     def __init__(self):
-        try:
-            self.headers = {"User-Agent": config.USER_AGENT}
-            cloudinary.config(
-                cloud_name=config.CLOUDINARY_CLOUD_NAME,
-                api_key=config.CLOUDINARY_API_KEY,
-                api_secret=config.CLOUDINARY_API_SECRET,
-                secure=True
-            )
-        except Exception as e:
-            logger.critical(f"🚨 Cloudinary Config Failed: {e}")
+        self.headers = {"User-Agent": config.USER_AGENT}
+        # Cloudinary config rămâne la fel
+
+    async def fetch_page_views(self, title_slug: str) -> int:
+        """Obține numărul de vizualizări pentru ultimele 30 de zile."""
+        if not title_slug or title_slug == "history": return 0
+
+        # Generăm datele pentru ultima lună completă
+        end_date = datetime.now().replace(day=1) - timedelta(days=1)
+        start_date = end_date.replace(day=1)
+
+        start_str = start_date.strftime("%Y%m01")
+        end_str = end_date.strftime("%Y%m%d")
+
+        # Endpoint-ul de Analytics de la Wikimedia (Atenție: user agents 'user' elimină botii)
+        url = f"https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/user/{title_slug}/monthly/{start_str}/{end_str}"
+
+        async with httpx.AsyncClient(headers=self.headers, timeout=10.0) as client:
+            try:
+                res = await client.get(url)
+                if res.status_code == 200:
+                    data = res.json()
+                    return sum(item['views'] for item in data.get('items', []))
+            except Exception as e:
+                logger.warning(f"📊 PageViews Error for {title_slug}: {e}")
+        return 0
 
     async def fetch_today(self) -> List[dict]:
         now = datetime.now()

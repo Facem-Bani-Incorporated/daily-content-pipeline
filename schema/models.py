@@ -1,6 +1,13 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
 from datetime import date
+class EventCategory(str, Enum):
+    WAR = "war"
+    TECHNOLOGY = "technology"
+    SCIENCE = "science"
+    POLITICS = "politics"
+    CULTURE = "culture"
+    DISASTER = "disaster"
 
 class Translations(BaseModel):
     en: str
@@ -17,6 +24,8 @@ class SecondaryEvent(BaseModel):
     ai_relevance_score: float
 
 class MainEvent(BaseModel):
+    category: EventCategory
+    page_views_30d: int = 0
     title_translations: Translations
     year: int
     source_url: str
