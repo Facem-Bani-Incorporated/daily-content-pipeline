@@ -164,37 +164,26 @@ async def main():
             secondary_events=secondary_objs
         )
 
-        # --- STEP 8: EXPORT FULL REPORT TO TXT ---
-        report_file = f"full_output_{payload.date_processed}.txt"
+        # --- STEP 8: RAILWAY LOGGING (Full Data) ---
+        # În loc de fișier .txt (pe care Railway îl ascunde), printăm tot în loguri
+        full_payload_json = json.dumps(payload.model_dump(mode='json'), indent=4, ensure_ascii=False)
 
-        # Extragem dicționarele din obiectele Pydantic pentru a putea folosi .items()
-        narratives_dict = payload.main_event.narrative_translations.model_dump()
-        titles_dict = payload.main_event.title_translations.model_dump()
+        print("\n" + "🚀" + "═" * 60)
+        print("     FULL PAYLOAD DATA (COPY-PASTE READY)")
+        print("═" * 60)
+        # Printăm JSON-ul întreg. Railway va păstra asta în logs.
+        print(full_payload_json)
+        print("═" * 60 + "\n")
 
-        with open(report_file, "w", encoding="utf-8") as f:
-            f.write("═" * 60 + "\n")
-            f.write(f"🚀 PIPELINE FULL REPORT: {payload.date_processed}\n")
-            f.write("═" * 60 + "\n\n")
-            f.write(f"WINNER: {payload.main_event.year} - {payload.main_event.category.upper()}\n")
-            f.write(f"TOTAL SCORE: {payload.main_event.impact_score}\n\n")
+        # --- STEP 9: MINIMALIST INSPECTOR (Pentru vizualizare rapidă) ---
+        # Păstrăm și varianta scurtă ca să știi imediat dacă a ieșit bine
+        display = payload.model_dump(mode='json')
+        display['api_secret'] = "********"
+        narratives = display['main_event']['narrative_translations']
+        for lang in narratives:
+            narratives[lang] = narratives[lang][:100] + "..."  # Doar aici tăiem
 
-            f.write("--- FULL NARRATIVES (All Languages) ---\n")
-            # ACUM folosim variabila transformată în dict
-            for lang, text in narratives_dict.items():
-                f.write(f"\n[{lang.upper()}]:\n{text}\n")
-
-            f.write("\n" + "--- SECONDARY EVENTS ---\n")
-            for sec in payload.secondary_events:
-                # Și aici transformăm title_translations dacă e model Pydantic
-                sec_titles = sec.title_translations.model_dump() if hasattr(sec.title_translations,
-                                                                            'model_dump') else sec.title_translations
-                f.write(f"• {sec.year}: {sec_titles.get('en')} (Score: {sec.ai_relevance_score})\n")
-
-            f.write("\n" + "═" * 60 + "\n")
-            f.write("RAW JSON PAYLOAD:\n")
-            f.write(json.dumps(payload.model_dump(mode='json'), indent=4, ensure_ascii=False))
-
-        logger.info(f"📄 Full report saved: {report_file}")
+        logger.info(f"✅ Preview: {display['main_event']['year']} - {display['main_event']['category']}")
 
         # --- STEP 9: MINIMALIST CONSOLE LOG ---
         display = payload.model_dump(mode='json')
