@@ -4,7 +4,6 @@ from core.config import config
 from enum import Enum
 
 
-# Definim categoriile la nivel de cod pentru consistență între Python și Java
 class EventCategory(str, Enum):
     WAR = "war"
     TECHNOLOGY = "technology"
@@ -22,77 +21,80 @@ class AIProcessor:
         self.categories = [c.value for c in EventCategory]
 
     async def batch_score_and_categorize(self, candidates: list):
-        """
-        Analizează setul de candidați, le atribuie o categorie, un scor de impact
-        și traduce titlurile. Include input despre popularitate (views).
-        """
-        # Construim un context bogat pentru AI
+        """Analizează candidații și returnează un JSON strict."""
         candidates_text = "\n".join([
-            f"ID {i}: ({item['year']}) {item['text'][:150]} | Monthly Views: {item.get('views', 0)}"
+            f"ID_{i}: ({item['year']}) {item['text'][:150]} | Views: {item.get('views', 0)}"
             for i, item in enumerate(candidates)
         ])
 
+        # Prompt ultra-strict cu One-Shot Example
         prompt = f"""
-        Act as an Elite Historian and Data Analyst. Analyze these historical events.
+        Return ONLY a JSON object. No conversational text.
 
         TASKS:
-        1. CATEGORY: Assign one of these categories: {self.categories}.
-        2. IMPACT SCORE: Rate 0-100 based on global historical significance AND current relevance (Views).
-        3. TRANSLATIONS: Provide short, engaging titles in EN, RO, ES, DE, FR.
+        1. Categorize each ID using ONLY: {self.categories}.
+        2. Impact Score (0-100) based on historical depth and monthly views.
+        3. Multilingual titles (EN, RO, ES, DE, FR).
 
-        INPUT DATA:
+        INPUT:
         {candidates_text}
 
-        CONSTRAINT: Return ONLY a valid JSON object.
-        JSON STRUCTURE:
+        EXAMPLE OUTPUT FORMAT:
         {{
             "results": {{
                 "ID_0": {{
-                    "category": "technology",
-                    "score": 85,
-                    "titles": {{ "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..." }}
+                    "category": "science",
+                    "score": 92,
+                    "titles": {{ "en": "Discovery of Penicillin", "ro": "Descoperirea penicilinei", "es": "Descubrimiento de la penicilina", "de": "Entdeckung des Penicillins", "fr": "Découverte de la pénicilline" }}
                 }}
             }}
         }}
         """
 
-        completion = self.client.chat.completions.create(
-            model="llama-3.3-70b-versatile",  # Modelul flagship pentru logică complexă
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"}
-        )
-        return json.loads(completion.choices[0].message.content)
+        try:
+            completion = self.client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system",
+                     "content": "You are a specialized API that only outputs valid JSON. Do not explain, do not comment."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.1  # Temperatura mică scade riscul de halucinații
+            )
+            return json.loads(completion.choices[0].message.content)
+        except Exception as e:
+            # Fallback în caz de eroare majoră (rețea/limită rată)
+            return {"results": {}, "error": str(e)}
 
     async def generate_multilingual_main_event(self, event_data: dict):
-        """
-        Generează conținutul premium pentru evenimentul principal al zilei.
-        Folosește categoria pentru a adapta tonul narațiunii.
-        """
+        """Generează narațiunea detaliată cu garanție de structură JSON."""
         text = event_data.get('text', '')
         year = event_data.get('year', '')
         category = event_data.get('category', 'general')
-        views = event_data.get('views', 0)
 
         prompt = f"""
-        Deep Dive Analysis: {text} ({year}).
-        Category: {category}.
-        Monthly Interest: {views} page views.
+        Return ONLY JSON. Write a professional history narrative (400 words) about: {text} ({year}).
+        Tone: Academic yet engaging for category: {category}.
 
-        TASK:
-        1. Create a captivating title.
-        2. Write a 400-word narrative (storytelling style). Use a tone suitable for {category}.
-        3. Translate both into: English, Romanian, Spanish, German, French.
-
-        OUTPUT JSON:
+        REQUIRED STRUCTURE:
         {{
-            "titles": {{ "en": "..", "ro": "..", "es": "..", "de": "..", "fr": ".." }},
-            "narratives": {{ "en": "..", "ro": "..", "es": "..", "de": "..", "fr": ".." }}
+            "titles": {{ "en": "", "ro": "", "es": "", "de": "", "fr": "" }},
+            "narratives": {{ "en": "", "ro": "", "es": "", "de": "", "fr": "" }}
         }}
         """
 
-        completion = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"}
-        )
-        return json.loads(completion.choices[0].message.content)
+        try:
+            completion = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system",
+                     "content": "Output only the requested JSON. Ensure all fields are filled. Do not truncate the narratives."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.3
+            )
+            return json.loads(completion.choices[0].message.content)
+        except Exception as e:
+            return {"titles": {}, "narratives": {}, "error": str(e)}

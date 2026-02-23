@@ -14,12 +14,12 @@ from tenacity import retry, stop_after_attempt, wait_fixed
 logger = setup_logger("MainPipeline")
 
 
-# --- 1. FUNCȚII DE BRIDGE (Direct aici pentru a evita erorile de import) ---
+# --- 1. BRIDGE FUNCTIONS (Zero Circular Imports) ---
 
 async def save_event_content_safe(payload: DailyPayload):
-    """Salvează backup local doar dacă DATABASE_URL este configurat."""
+    """Saves backup locally only if DB is configured."""
     if not config.DATABASE_URL:
-        logger.info("ℹ️ Database opțional: Skip local backup (DATABASE_URL lipsește).")
+        logger.info("ℹ️ Database Optional: Skipping local backup.")
         return
 
     try:
@@ -37,22 +37,23 @@ async def save_event_content_safe(payload: DailyPayload):
                 )
                 session.add(new_entry)
             await session.commit()
-        logger.info(f"🏛️ Conținut arhivat local pentru anul {main.year}.")
+        logger.info(f"🏛️ Local archive saved for year {main.year}.")
     except Exception as e:
-        logger.warning(f"⚠️ Backup local eșuat, dar continuăm: {e}")
+        logger.warning(f"⚠️ Local backup failed (non-critical): {e}")
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(5))
 async def send_to_java(payload: DailyPayload):
-    """Trimite payload-ul către backend-ul de Java al lui Sergiu."""
+    """Sends payload to Sergiu's Spring Boot backend."""
     headers = {
         "X-Internal-Api-Key": config.INTERNAL_API_SECRET,
         "Content-Type": "application/json"
     }
+    # Important: model_dump(mode='json') ensures dates and enums are stringified correctly
     payload_json = payload.model_dump(mode='json')
 
     async with httpx.AsyncClient(timeout=120.0) as client:
-        logger.info(f"📤 Trimitere date către Java la: {config.JAVA_BACKEND_URL}")
+        logger.info(f"📤 Ingesting to Java: {config.JAVA_BACKEND_URL}")
         response = await client.post(
             config.JAVA_BACKEND_URL,
             json=payload_json,
@@ -62,84 +63,106 @@ async def send_to_java(payload: DailyPayload):
         return response.status_code
 
 
-# --- 2. PIPELINE-UL PRINCIPAL ---
+# --- 2. MAIN PIPELINE (Elite Performance) ---
 
 async def main():
-    logger.info("🚀 Pornire Pipeline Elite (Mode: Database Optional)...")
+    logger.info("🚀 Starting Elite Pipeline (Async Parallel Mode)...")
 
-    # 0. Inițializare DB (Dacă există URL-ul)
     if config.DATABASE_URL:
         try:
             await init_db()
         except Exception as e:
-            logger.warning(f"⚠️ Init DB failed: {e}")
+            logger.warning(f"⚠️ Database init failed: {e}")
 
     try:
         scraper = WikiScraper()
         processor = AIProcessor()
         ranker = ScoringEngine()
 
-        # 1. FETCH & PRE-SCREENING
+        # STEP 1: FETCH ALL EVENTS
         raw_events = await scraper.fetch_today()
         if not raw_events:
-            raise ValueError("Wikipedia API a returnat zero evenimente.")
+            raise ValueError("Wikipedia returned no events for today.")
 
+        # STEP 2: FAST HEURISTIC PRE-SCREENING
         for item in raw_events:
             item['h_score'] = ranker.heuristic_score(item)
 
+        # Select a wider net for enrichment (e.g., top 40)
         candidates = sorted(raw_events, key=lambda x: x['h_score'], reverse=True)[:config.MAX_CANDIDATES_FOR_AI]
 
-        # 2. ENRICHMENT (Popularitate & AI Scoring)
-        logger.info(f"📊 Procesare {len(candidates)} candidați...")
+        # STEP 3: PARALLEL ENRICHMENT (The Performance Boost)
+        logger.info(f"📊 Fetching page views in parallel for {len(candidates)} candidates...")
+
+        view_tasks = []
         for item in candidates:
             p = item.get("pages", [])
             slug = p[0].get("titles", {}).get("canonical") if p else None
-            item['views'] = await scraper.fetch_page_views(slug)
+            item['slug'] = slug
+            view_tasks.append(scraper.fetch_page_views(slug))
 
+        # This executes all HTTP requests simultaneously instead of one by one
+        views_results = await asyncio.gather(*view_tasks, return_exceptions=True)
+
+        for item, result in zip(candidates, views_results):
+            # Handle potential task exceptions so one fail doesn't kill the batch
+            item['views'] = result if isinstance(result, int) else 0
+
+        # STEP 4: AI BATCH ANALYSIS
+        logger.info("🤖 AI Categorization and Scoring...")
         ai_data = await processor.batch_score_and_categorize(candidates)
         results = ai_data.get('results', {})
 
-        # 3. RANKING FINAL
+        # STEP 5: HYBRID RANKING (AI + Popularity + Heuristics)
         for idx, item in enumerate(candidates):
-            res = results.get(f"ID_{idx}", {"score": 50, "category": "POLITICS", "titles": {}})
-            item['category'] = res.get('category', 'POLITICS')
+            res = results.get(f"ID_{idx}", {"score": 50, "category": "politics", "titles": {}})
+            item['category'] = res.get('category', 'politics')
             item['ai_impact'] = res.get('score', 50)
             item['titles'] = res.get('titles', {})
-            item['final_score'] = ranker.calculate_final_score(item['h_score'], item['ai_impact'], item.get('views', 0))
+
+            item['final_score'] = ranker.calculate_final_score(
+                item['h_score'],
+                item['ai_impact'],
+                item.get('views', 0)
+            )
 
         candidates.sort(key=lambda x: x.get('final_score', 0), reverse=True)
         top_data = candidates[0]
 
-        # 4. GENERARE MEDIA & CONTINUT
+        # STEP 6: PREMIUM CONTENT & MEDIA GENERATION
+        logger.info(f"✨ Generating Premium Narrative for: {top_data['year']}")
         main_content = await processor.generate_multilingual_main_event(top_data)
 
-        # Imagini Main
-        p_main = top_data.get("pages", [])
-        slug_main = p_main[0].get("titles", {}).get("canonical") if p_main else "history"
+        # Main Gallery (Parallel Cloudinary Uploads)
+        slug_main = top_data.get('slug') or "history"
         wiki_imgs = await scraper.fetch_gallery_urls(slug_main, limit=3)
-        main_gallery = [scraper.upload_to_cloudinary(url, f"main_{top_data['year']}_{i}") for i, url in
-                        enumerate(wiki_imgs)]
+        main_gallery_tasks = [
+            asyncio.to_thread(scraper.upload_to_cloudinary, url, f"main_{top_data['year']}_{i}")
+            for i, url in enumerate(wiki_imgs)
+        ]
+        main_gallery = await asyncio.gather(*main_gallery_tasks)
 
-        # Evenimente Secundare (Top 5)
+        # Secondary Events (Top 5)
         secondary_objs = []
         for idx, item in enumerate(candidates[1:6]):
-            p_sec = item.get("pages", [])
-            slug_sec = p_sec[0].get("titles", {}).get("canonical") if p_sec else ""
+            slug_sec = item.get('slug')
             thumb = None
             if slug_sec:
                 imgs_sec = await scraper.fetch_gallery_urls(slug_sec, limit=1)
                 if imgs_sec:
-                    thumb = scraper.upload_to_cloudinary(imgs_sec[0], f"sec_{item['year']}_{idx}")
+                    # Threading Cloudinary as it's a synchronous blocking call
+                    thumb = await asyncio.to_thread(scraper.upload_to_cloudinary, imgs_sec[0],
+                                                    f"sec_{item['year']}_{idx}")
 
             secondary_objs.append(SecondaryEvent(
                 title_translations=item.get('titles', {}),
                 year=item['year'],
-                source_url=f"https://en.wikipedia.org/wiki/{slug_sec}",
+                source_url=f"https://en.wikipedia.org/wiki/{slug_sec}" if slug_sec else "",
                 ai_relevance_score=item.get('final_score', 0),
                 thumbnail_url=thumb
             ))
 
-        # 5. CONSTRUCȚIE PAYLOAD
+        # STEP 7: FINAL PAYLOAD ASSEMBLY
         payload = DailyPayload(
             date_processed=datetime.now().date(),
             api_secret=config.INTERNAL_API_SECRET,
@@ -156,25 +179,29 @@ async def main():
             secondary_events=secondary_objs
         )
 
-        # --- INSPECTOR JSON (Log-ul pe care îl cauți în Railway) ---
+        # --- INSPECTOR LOG ---
         print("\n" + "═" * 60)
-        print("🔍 PAYLOAD INSPECTOR (Ready for Java):")
+        print("🔍 PAYLOAD INSPECTOR (Ready for Spring Boot)")
         print("═" * 60)
         print(json.dumps(payload.model_dump(mode='json'), indent=4, ensure_ascii=False))
         print("═" * 60 + "\n")
 
-        # 6. TRANSMISIE
+        # STEP 8: SAVE & TRANSMIT
         await save_event_content_safe(payload)
-        status_code = await send_to_java(payload)
 
-        if status_code in [200, 201]:
-            logger.info(f"✅ SUCCES: Datele au fost transmise către Spring Boot.")
+        try:
+            status_code = await send_to_java(payload)
+            if status_code in [200, 201]:
+                logger.info("✅ SUCCESS: Data ingested by Java backend.")
+        except Exception as e:
+            logger.error(f"❌ Java Ingestion Failed: {e}")
 
     except Exception as e:
         logger.error(f"🚨 Pipeline Crash: {e}", exc_info=True)
     finally:
         if engine and config.DATABASE_URL:
             await engine.dispose()
+            logger.info("🔌 DB Connections closed.")
 
 
 if __name__ == "__main__":

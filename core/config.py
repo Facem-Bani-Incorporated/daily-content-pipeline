@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: Optional[str] = None
-    MAX_CANDIDATES_FOR_AI: int = 15
+    MAX_CANDIDATES_FOR_AI: int = 50
 
     @field_validator("JAVA_BACKEND_URL")
     @classmethod
