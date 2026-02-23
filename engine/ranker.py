@@ -1,18 +1,18 @@
 import math
 from typing import Dict
 
+
 class ScoringEngine:
     def __init__(self):
-        # Cuvinte cheie care indică evenimente cu potențial uriaș de click/engagement
         self.weights = {
-            # Drama & Conflict (High Engagement)
-            "war": 40, "revolution": 50, "assassinated": 50, "execution": 45,
-            # Triumf & Progres
-            "discovered": 40, "invention": 40, "space": 45, "atomic": 45,
-            # Shock Value & Curiozitate
-            "scandal": 50, "disaster": 45, "mystery": 40, "secret": 40,
-            # Istorie Majoră
-            "independence": 40, "empire": 35, "collapse": 45
+            # Tehnologie & Știință (Boosted)
+            "discovery": 60, "invention": 60, "scientific": 55, "patent": 50,
+            "computer": 55, "space": 60, "medical": 50, "vaccine": 55,
+            "first": 35,  # Primele realizări de orice fel
+
+            # Drama (Rămân importante, dar nu mai domină)
+            "war": 30, "revolution": 35, "assassinated": 40,
+            "disaster": 35, "mystery": 45
         }
 
     def heuristic_score(self, item: dict) -> float:

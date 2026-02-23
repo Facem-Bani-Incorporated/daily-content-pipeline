@@ -27,15 +27,16 @@ class AIProcessor:
 
         # Prompt optimizat pentru engagement și diversitate geografică
         prompt = f"""
-        Return ONLY a JSON object. No conversational text.
+            Return ONLY a JSON object. No conversational text.
 
-        TASKS & RULES:
-        1. Categorize each ID using ONLY: {self.categories}.
-        2. Impact Score (0-100): Score based on GLOBAL historical impact, dramatic weight, and CURIOSITY potential. 
-           - PENALIZE strictly local/niche US/European events if global alternatives exist.
-           - BOOST events with massive visual or emotional impact (revolutions, major discoveries, betrayals).
-        3. Multilingual titles: Make them ENGAGING and HOOKING (e.g., instead of "Discovery of Penicillin", use "The Accidental Discovery That Saved Millions: Penicillin").
-
+            TASKS & RULES:
+            1. Categorize each ID using ONLY: {self.categories}.
+            2. DIVERSITY RULE: If multiple events have similar impact, PRIORITIZE Technology, Science, and Discovery over War/Politics. 
+               We want a balanced feed, not just a list of battles.
+            3. Impact Score (0-100): 
+               - High scores for breakthroughs (e.g., first satellite, DNA structure, internet).
+               - Medium-high for major cultural shifts.
+               - Lower for routine political appointments or minor battles.
         INPUT:
         {candidates_text}
 
