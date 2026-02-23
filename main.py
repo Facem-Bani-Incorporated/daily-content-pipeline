@@ -187,11 +187,12 @@ async def main():
             metadata={"secondary_summaries": secondary_summaries_metadata}
         )
 
-        # --- STEP 8: RAILWAY LOGGING (Full Data) ---
-        full_payload_json = json.dumps(payload.model_dump(mode='json'), indent=4, ensure_ascii=False)
+        # --- STEP 8: RAILWAY LOGGING (Single-line JSON for clean copy-paste) ---
+        # FĂRĂ indent=4 ! Asta va genera un singur rând lung, fără întreruperi de timestamp.
+        full_payload_json = json.dumps(payload.model_dump(mode='json'), ensure_ascii=False)
+
         print("\n" + "🚀" + "═" * 60)
-        print(f"     FULL PAYLOAD DATA (COPY-PASTE READY) - {report_file}")
-        print("═" * 60)
+        print("📦 FULL PAYLOAD DATA (Raw JSON - Copy & Paste into a formatter):")
         print(full_payload_json)
         print("═" * 60 + "\n")
 
@@ -205,9 +206,9 @@ async def main():
             if isinstance(val, str):
                 narratives[lang] = val[:70] + "..."
 
-        print("\n" + "═" * 60)
-        print(f"🔍 CONSOLE PREVIEW (Full data available in Railway Logs)")
-        print(json.dumps(display, indent=4, ensure_ascii=False))
+        # Aici scoatem și indentul ca să nu ne mai polueze consola Railway
+        print("🔍 CONSOLE PREVIEW (Minified):")
+        print(json.dumps(display, ensure_ascii=False))
         print("═" * 60 + "\n")
 
         # --- STEP 10: TRANSMIT ---
