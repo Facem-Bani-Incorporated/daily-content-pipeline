@@ -1,3 +1,7 @@
+from typing import Optional
+from pydantic_settings import BaseSettings  # <--- Aceasta este linia salvatoare
+from pydantic import ConfigDict, field_validator
+
 class Settings(BaseSettings):
     model_config = ConfigDict(env_file=".env", env_file_encoding='utf-8', extra='ignore')
 
