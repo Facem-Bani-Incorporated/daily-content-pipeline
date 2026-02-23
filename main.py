@@ -167,7 +167,10 @@ async def main():
         )
 
         # --- STEP 9: INSPECTION & TRANSMISSION ---
-        print_full_inspection(payload)
+        full_json = payload.model_dump_json(indent=4)  # indent=4 îl face ușor de citit
+        print("\n🔥 DEBUG FULL JSON PAYLOAD START 🔥")
+        print(full_json)
+        print("🔥 DEBUG FULL JSON PAYLOAD END 🔥\n")
 
         try:
             status = await send_to_java(payload)
