@@ -132,6 +132,7 @@ async def main():
         main_gallery = await asyncio.gather(*main_gallery_tasks)
 
         secondary_objs = []
+        # --- BUCĂȚICA ASTA ERA PROBLEMA (Indentația) ---
         for idx, item in enumerate(candidates[1:6]):
             slug_sec = item.get('slug')
             thumb = None
@@ -149,59 +150,62 @@ async def main():
                 thumbnail_url=thumb
             ))
 
-            # --- STEP 7: PAYLOAD ASSEMBLY ---
-            payload = DailyPayload(
-                date_processed=datetime.now().date(),
-                api_secret=config.INTERNAL_API_SECRET,
-                main_event=MainEvent(
-                    title_translations=main_content['titles'],
-                    year=top_data['year'],
-                    category=top_data['category'],
-                    source_url=f"https://en.wikipedia.org/wiki/{slug_main}",
-                    event_date=datetime.now().date(),
-                    narrative_translations=main_content['narratives'],
-                    impact_score=top_data['final_score'],
-                    gallery=[img for img in main_gallery if img]
-                ),
-                secondary_events=secondary_objs
-            )
+        # --- STEP 7: PAYLOAD ASSEMBLY (Acum este în afara buclei for) ---
+        payload = DailyPayload(
+            date_processed=datetime.now().date(),
+            api_secret=config.INTERNAL_API_SECRET,
+            main_event=MainEvent(
+                title_translations=main_content['titles'],
+                year=top_data['year'],
+                category=top_data['category'],
+                source_url=f"https://en.wikipedia.org/wiki/{slug_main}",
+                event_date=datetime.now().date(),
+                narrative_translations=main_content['narratives'],
+                impact_score=top_data['final_score'],
+                gallery=[img for img in main_gallery if img]
+            ),
+            secondary_events=secondary_objs
+        )
 
-            # --- MINIMALIST INSPECTOR & METRICS ---
-            display_payload = payload.model_dump(mode='json')
-            payload_size_kb = len(json.dumps(display_payload)) / 1024
+        # --- MINIMALIST INSPECTOR & METRICS ---
+        display_payload = payload.model_dump(mode='json')
+        payload_size_kb = len(json.dumps(display_payload)) / 1024
+        display_payload['api_secret'] = "********HIDDEN********"
 
-            display_payload['api_secret'] = "********HIDDEN********"
-            for lang in display_payload['main_event']['narrative_translations']:
-                text = display_payload['main_event']['narrative_translations'][lang]
-                display_payload['main_event']['narrative_translations'][lang] = text[:100] + "..." if len(
-                    text) > 100 else text
+        for lang in display_payload['main_event']['narrative_translations']:
+            text = display_payload['main_event']['narrative_translations'][lang]
+            display_payload['main_event']['narrative_translations'][lang] = text[:100] + "..." if len(
+                text) > 100 else text
 
-            print("\n" + "═" * 60)
-            print(f"🔍 PAYLOAD INSPECTOR | Size: {payload_size_kb:.2f} KB")
-            print(f"📊 Main Category: {top_data['category'].upper()}")
-            print("═" * 60)
-            print(json.dumps(display_payload, indent=4, ensure_ascii=False))
-            print("═" * 60 + "\n")
+        print("\n" + "═" * 60)
+        print(f"🔍 PAYLOAD INSPECTOR | Size: {payload_size_kb:.2f} KB")
+        print(f"📊 Main Category: {top_data['category'].upper()}")
+        print("═" * 60)
+        print(json.dumps(display_payload, indent=4, ensure_ascii=False))
+        print("═" * 60 + "\n")
 
-            # --- STEP 8: SAVE & TRANSMIT ---
+        # --- STEP 8: SAVE & TRANSMIT ---
+        backup_filename = f"backup_{payload.date_processed}.json"
+        with open(backup_filename, "w", encoding="utf-8") as f:
+            json.dump(payload.model_dump(mode='json'), f, ensure_ascii=False, indent=4)
+        logger.info(f"💾 Emergency backup saved to {backup_filename}")
 
-            # 8a. Local JSON Backup (In caz că pică Ingestia sau DB-ul)
-            backup_filename = f"backup_{payload.date_processed}.json"
-            with open(backup_filename, "w", encoding="utf-8") as f:
-                json.dump(payload.model_dump(mode='json'), f, ensure_ascii=False, indent=4)
-            logger.info(f"💾 Emergency backup saved to {backup_filename}")
+        await save_event_content_safe(payload)
 
-            # 8b. Database Save
-            await save_event_content_safe(payload)
-
-            # 8c. Java Ingestion
-            try:
-                status_code = await send_to_java(payload)
-                if status_code in [200, 201]:
-                    logger.info(f"✅ SUCCESS: Ingested to Java (Status {status_code})")
-                    # Daca a reusit, putem sterge backup-ul local sa nu ocupe spatiu
-                    import os
+        try:
+            status_code = await send_to_java(payload)
+            if status_code in [200, 201]:
+                logger.info(f"✅ SUCCESS: Ingested to Java (Status {status_code})")
+                import os
+                if os.path.exists(backup_filename):
                     os.remove(backup_filename)
-            except Exception as e:
-                logger.error(f"❌ Java Ingestion Failed: {e}")
-                logger.warning(f"⚠️ Action Required: Manual ingestion needed for {backup_filename}")
+        except Exception as e:
+            logger.error(f"❌ Java Ingestion Failed: {e}")
+            logger.warning(f"⚠️ Manual ingestion needed: {backup_filename}")
+
+    except Exception as e:
+        logger.error(f"🚨 Pipeline Crash: {e}", exc_info=True)
+    finally:
+        if engine and config.DATABASE_URL:
+            await engine.dispose()
+            logger.info("🔌 DB Connections closed.")
