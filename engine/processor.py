@@ -4,6 +4,7 @@ from groq import Groq
 from core.config import config
 from enum import Enum
 
+
 class EventCategory(str, Enum):
     WAR = "war"
     TECHNOLOGY = "technology"
@@ -11,31 +12,28 @@ class EventCategory(str, Enum):
     POLITICS = "politics"
     CULTURE = "culture"
     DISASTER = "disaster"
-    DISCOVERY = "discovery"
+
 
 class AIProcessor:
     def __init__(self, model: str = config.AI_MODEL):
         self.client = Groq(api_key=config.GROQ_API_KEY)
         self.model = model
+        # Extragem categoriile exact cum sunt în Enum-ul tău pentru consistență (lowercase)
         self.categories = [c.value for c in EventCategory]
 
     async def batch_score_and_categorize(self, candidates: list):
-        """
-        Pasul 1: Analizează rapid toți candidații pentru a-i ierarhiza.
-        Produce scoruri, categorii și titluri scurte.
-        """
+        """Analizează rapid candidații pentru ierarhizare și clasificare."""
         candidates_text = "\n".join([
-            f"ID_{i}: ({item['year']}) {item['text'][:150]}"
+            f"ID_{i}: ({item['year']}) {item['text'][:200]}"
             for i, item in enumerate(candidates)
         ])
 
         prompt = f"""
         Return ONLY a JSON object. No prose.
         TASKS:
-        1. Categorize each ID using ONLY: {self.categories}.
-        2. Score impact (0-100) based on historical significance.
+        1. Categorize each ID using ONLY these exact lowercase values: {self.categories}.
+        2. Score impact (0-100) based on global historical significance.
         3. Create engaging TITLES in 5 languages (en, ro, es, de, fr).
-        4. Create a VERY SHORT SUMMARY (1 sentence) in 5 languages.
 
         STRUCTURE:
         {{
@@ -43,8 +41,7 @@ class AIProcessor:
                 "ID_0": {{
                     "category": "science",
                     "score": 95,
-                    "titles": {{ "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..." }},
-                    "summaries": {{ "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..." }}
+                    "titles": {{ "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..." }}
                 }}
             }}
         }}
@@ -57,11 +54,12 @@ class AIProcessor:
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are a professional historian API. Output valid JSON only."},
+                    {"role": "system",
+                     "content": "You are a professional historian API. Output valid JSON only. Use lowercase for categories."},
                     {"role": "user", "content": prompt}
                 ],
                 response_format={"type": "json_object"},
-                temperature=0.15
+                temperature=0.1
             )
             return json.loads(completion.choices[0].message.content)
         except Exception as e:
@@ -69,22 +67,26 @@ class AIProcessor:
             return {"results": {}}
 
     async def generate_multilingual_main_event(self, event_data: dict):
-        """
-        Pasul 2: Generează narațiunea PREMIUM (400+ cuvinte) pentru evenimentul principal.
-        """
+        """Generează narațiunea PREMIUM (400+ cuvinte) tradusă complet."""
         text = event_data.get('text', '')
         year = event_data.get('year', '')
 
         prompt = f"""
-        Return ONLY JSON. Write a professional history narrative (approx 400 words) about: {text} ({year}).
-        Provide the narrative in 5 languages: English, Romanian, Spanish, German, and French.
-        Ensure historical accuracy and an engaging educational tone.
+        Write a professional history narrative of EXACTLY 400 words for EACH language. 
+        Topic: {text} ({year}).
+        Languages: English, Romanian, Spanish, German, French.
+
+        CRITICAL: The Romanian, Spanish, German, and French versions must be as LONG and DETAILED as the English one. Do not summarize.
 
         REQUIRED JSON STRUCTURE:
         {{
             "titles": {{ "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..." }},
             "narratives": {{ 
-                "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..." 
+                "en": "[400 words]", 
+                "ro": "[400 words]", 
+                "es": "[400 words]", 
+                "de": "[400 words]", 
+                "fr": "[400 words]" 
             }}
         }}
         """
@@ -93,7 +95,8 @@ class AIProcessor:
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are a world-class historian. Maintain 400 words per language."},
+                    {"role": "system",
+                     "content": "You are a world-class polyglot historian. You never summarize translations; you provide equal depth in all 5 languages."},
                     {"role": "user", "content": prompt}
                 ],
                 response_format={"type": "json_object"},
@@ -105,19 +108,19 @@ class AIProcessor:
             return {"titles": {}, "narratives": {}}
 
     async def generate_secondary_narratives(self, secondary_candidates: list):
-        """
-        Pasul 3: Generează narațiuni medii (150-250 cuvinte) pentru evenimentele secundare.
-        Trimitem toate evenimentele într-un singur apel pentru eficiență.
-        """
+        """Generează narațiuni de 150-250 cuvinte pentru evenimentele secundare."""
         formatted_list = "\n".join([
             f"EVENT_{i}: ({item['year']}) {item['text']}"
             for i, item in enumerate(secondary_candidates)
         ])
 
         prompt = f"""
-        Return ONLY a JSON object. 
-        For each event provided, write a medium-length history narrative (150-250 words).
-        You must provide these narratives in 5 languages: en, ro, es, de, fr.
+        For each event, write a history narrative of 200 words in 5 languages (en, ro, es, de, fr).
+
+        STRICT RULES:
+        1. Each language must have roughly the same length (approx 200 words).
+        2. Do NOT cut the Romanian or Spanish versions short.
+        3. Maintain a professional, educational tone.
 
         INPUT:
         {formatted_list}
@@ -125,13 +128,8 @@ class AIProcessor:
         REQUIRED JSON STRUCTURE:
         {{
             "EVENT_0": {{
-                "en": "Narrative...",
-                "ro": "Narațiune...",
-                "es": "...",
-                "de": "...",
-                "fr": "..."
-            }},
-            "EVENT_1": {{ ... }}
+                "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..."
+            }}
         }}
         """
 
@@ -139,7 +137,8 @@ class AIProcessor:
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are a concise but thorough historian. Write 150-250 words per narrative per language."},
+                    {"role": "system",
+                     "content": "You are a detailed historian. You must provide extensive translations. Minimum 150 words per language per event."},
                     {"role": "user", "content": prompt}
                 ],
                 response_format={"type": "json_object"},
@@ -148,5 +147,4 @@ class AIProcessor:
             return json.loads(completion.choices[0].message.content)
         except Exception as e:
             print(f"Secondary Events AI Error: {e}")
-            # Returnăm un dicționar gol pentru a fi gestionat de main.py
             return {}
