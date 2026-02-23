@@ -14,10 +14,9 @@ from tenacity import retry, stop_after_attempt, wait_fixed
 logger = setup_logger("MainPipeline")
 
 
-# --- 1. BRIDGE FUNCTIONS (Fail-safe & Lazy Load) ---
+# --- 1. BRIDGE FUNCTIONS ---
 
 async def save_event_content_safe(payload: DailyPayload):
-    """Salvează în DB locală doar dacă este configurată."""
     if not config.DATABASE_URL:
         return
     try:
@@ -43,20 +42,14 @@ async def save_event_content_safe(payload: DailyPayload):
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(5))
 async def send_to_java(payload: DailyPayload):
-    """Trimite datele către backend-ul Spring Boot."""
     headers = {
         "X-Internal-Api-Key": config.INTERNAL_API_SECRET,
         "Content-Type": "application/json"
     }
     payload_json = payload.model_dump(mode='json')
-
     async with httpx.AsyncClient(timeout=120.0) as client:
         logger.info(f"📤 Ingesting to Java: {config.JAVA_BACKEND_URL}")
-        response = await client.post(
-            config.JAVA_BACKEND_URL,
-            json=payload_json,
-            headers=headers
-        )
+        response = await client.post(config.JAVA_BACKEND_URL, json=payload_json, headers=headers)
         response.raise_for_status()
         return response.status_code
 
@@ -64,20 +57,13 @@ async def send_to_java(payload: DailyPayload):
 # --- 2. MAIN PIPELINE ---
 
 async def main():
-    logger.info("🚀 Starting Elite Pipeline (DB-Optional Mode)...")
+    logger.info("🚀 Starting Elite Pipeline (Robust Mode)...")
 
-    # FIX: Definim report_file la început pentru a nu mai avea Crash (NameError) la final!
-    report_file = f"full_output_{datetime.now().date()}.txt"
-
-    if config.DATABASE_URL:
-        try:
-            from core.database import init_db
-            await init_db()
-            logger.info("✅ Database connection initialized.")
-        except Exception as e:
-            logger.error(f"❌ DB Init Error: {e}")
-    else:
-        logger.info("ℹ️ Running in DB-less mode (DATABASE_URL missing).")
+    # Initializări pentru a preveni NameError
+    empty_translations = {"en": "", "ro": "", "es": "", "de": "", "fr": ""}
+    main_content = {"titles": empty_translations, "narratives": empty_translations}
+    top_data = {}
+    main_gallery = []
 
     try:
         scraper = WikiScraper()
@@ -89,13 +75,13 @@ async def main():
         if not raw_events:
             raise ValueError("Wikipedia returned no events.")
 
-        # STEP 2: PRE-RANKING (Heuristics)
+        # STEP 2: PRE-RANKING
         for item in raw_events:
             item['h_score'] = ranker.heuristic_score(item)
 
         candidates = sorted(raw_events, key=lambda x: x['h_score'], reverse=True)[:config.MAX_CANDIDATES_FOR_AI]
 
-        # STEP 3: PAGE VIEWS (Parallel)
+        # STEP 3: PAGE VIEWS
         logger.info(f"📊 Fetching popularity data for top {len(candidates)} candidates...")
         view_tasks = [scraper.fetch_page_views(item.get('slug')) for item in candidates]
         views_results = await asyncio.gather(*view_tasks, return_exceptions=True)
@@ -103,20 +89,15 @@ async def main():
         for item, result in zip(candidates, views_results):
             item['views'] = result if isinstance(result, int) else 0
 
-        # STEP 4: AI SELECTION & CATEGORIZATION
-        logger.info("🤖 AI is analyzing and choosing the best content...")
-        # AICI presupunem că AI-ul va întoarce un dict cu `titles` și `summaries` (ambele multi-language)
+        # STEP 4: AI SELECTION
+        logger.info("🤖 AI is analyzing candidates...")
         ai_data = await processor.batch_score_and_categorize(candidates)
         results = ai_data.get('results', {})
 
-        # Fallback dictionary pentru siguranță la tipul Translations
-        empty_translations = {"en": "", "ro": "", "es": "", "de": "", "fr": ""}
-
         # STEP 5: HYBRID SCORING
         for idx, item in enumerate(candidates):
-            res = results.get(f"ID_{idx}", {"score": 50, "category": EventCategory.CULTURE.value})
+            res = results.get(f"ID_{idx}", {"score": 50, "category": "culture"})
 
-            # Mapăm categoria la Enum-ul Pydantic (protecție împotriva halucinațiilor AI)
             raw_cat = res.get('category', 'culture').lower()
             try:
                 item['category'] = EventCategory(raw_cat)
@@ -125,30 +106,40 @@ async def main():
 
             item['ai_impact'] = res.get('score', 50)
             item['titles'] = res.get('titles', empty_translations)
-            # Extragem rezumatul generat de AI (sau un default dacă lipsește)
             item['summaries'] = res.get('summaries', empty_translations)
             item['final_score'] = ranker.calculate_final_score(item['h_score'], item['ai_impact'], item.get('views', 0))
 
         candidates.sort(key=lambda x: x.get('final_score', 0), reverse=True)
         top_data = candidates[0]
+        slug_main = top_data.get('slug') or "history"
 
-        # --- MODIFICARE ÎN STEP 6: SECONDARY EVENTS ---
+        # STEP 6: PREMIUM CONTENT GENERATION (Main Event)
+        logger.info(f"✨ Generating Premium Content for {top_data['year']}...")
+        main_content = await processor.generate_multilingual_main_event(top_data)
+
+        # Main Gallery
+        wiki_imgs = await scraper.fetch_gallery_urls(slug_main, limit=3)
+        main_gallery_tasks = [
+            asyncio.to_thread(scraper.upload_to_cloudinary, url, f"main_{top_data['year']}_{i}")
+            for i, url in enumerate(wiki_imgs)
+        ]
+        main_gallery_results = await asyncio.gather(*main_gallery_tasks)
+        main_gallery = [img for img in main_gallery_results if img]
+
+        # STEP 7: SECONDARY EVENTS & SUMMARIES
         secondary_objs = []
         secondary_summaries_metadata = {}
 
         for idx, item in enumerate(candidates[1:6]):
             slug_sec = item.get('slug')
-            # Folosim thumbnail-ul de la Wikipedia dacă există, altfel un fallback stabil
             raw_img_url = item.get('wiki_thumb') or "https://images.unsplash.com/photo-1447069387593-a5de0862481e?w=400"
 
-            # Upload la Cloudinary
             thumb = await asyncio.to_thread(
                 scraper.upload_to_cloudinary,
                 raw_img_url,
                 f"sec_{item['year']}_{idx}"
             )
 
-            # Acum source_url va fi populat pentru că avem slug-ul extras corect
             sec_event = SecondaryEvent(
                 title_translations=item.get('titles', empty_translations),
                 year=item['year'],
@@ -159,59 +150,33 @@ async def main():
             secondary_objs.append(sec_event)
             secondary_summaries_metadata[f"year_{item['year']}"] = item.get('summaries', empty_translations)
 
-        # STEP 7: PAYLOAD ASSEMBLY
+        # STEP 8: PAYLOAD ASSEMBLY
         payload = DailyPayload(
             date_processed=datetime.now().date(),
             api_secret=config.INTERNAL_API_SECRET,
             main_event=MainEvent(
                 category=top_data['category'],
                 page_views_30d=top_data.get('views', 0),
-                title_translations=main_content['titles'],
+                title_translations=main_content.get('titles', empty_translations),
                 year=top_data['year'],
                 source_url=f"https://en.wikipedia.org/wiki/{slug_main}",
                 event_date=datetime.now().date(),
-                narrative_translations=main_content['narratives'],
+                narrative_translations=main_content.get('narratives', empty_translations),
                 impact_score=top_data['final_score'],
-                gallery=[img for img in main_gallery if img]
+                gallery=main_gallery
             ),
             secondary_events=secondary_objs,
-            # MAGIC HAPPENS HERE: Salvăm rezumatele în metadata ca să nu spargem modelul
             metadata={"secondary_summaries": secondary_summaries_metadata}
         )
 
-        # --- STEP 8: RAILWAY LOGGING (Single-line JSON for clean copy-paste) ---
-        # FĂRĂ indent=4 ! Asta va genera un singur rând lung, fără întreruperi de timestamp.
+        # STEP 9: LOGGING & TRANSMIT
         full_payload_json = json.dumps(payload.model_dump(mode='json'), ensure_ascii=False)
+        print(f"\n🚀 FULL PAYLOAD:\n{full_payload_json}\n")
 
-        print("\n" + "🚀" + "═" * 60)
-        print("📦 FULL PAYLOAD DATA (Raw JSON - Copy & Paste into a formatter):")
-        print(full_payload_json)
-        print("═" * 60 + "\n")
-
-        # --- STEP 9: MINIMALIST CONSOLE LOG ---
-        display = payload.model_dump(mode='json')
-        display['api_secret'] = "********"
-
-        narratives = display.get('main_event', {}).get('narrative_translations', {})
-        for lang in narratives:
-            val = narratives[lang]
-            if isinstance(val, str):
-                narratives[lang] = val[:70] + "..."
-
-        # Aici scoatem și indentul ca să nu ne mai polueze consola Railway
-        print("🔍 CONSOLE PREVIEW (Minified):")
-        print(json.dumps(display, ensure_ascii=False))
-        print("═" * 60 + "\n")
-
-        # --- STEP 10: TRANSMIT ---
         await save_event_content_safe(payload)
-
-        try:
-            status = await send_to_java(payload)
-            if status in [200, 201]:
-                logger.info(f"✅ SUCCESS: Data ingested by Java (Status {status}).")
-        except Exception as e:
-            logger.error(f"❌ Java Ingestion Failed: {e}")
+        status = await send_to_java(payload)
+        if status in [200, 201]:
+            logger.info(f"✅ SUCCESS: Status {status}")
 
     except Exception as e:
         logger.error(f"🚨 Pipeline Crash: {e}", exc_info=True)
@@ -220,7 +185,6 @@ async def main():
             try:
                 from core.database import engine
                 await engine.dispose()
-                logger.info("🔌 Database connection closed.")
             except:
                 pass
 
