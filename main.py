@@ -1,28 +1,29 @@
 import asyncio
 import json
 import httpx
+import os
 from datetime import datetime
 from core.logger import setup_logger
 from core.config import config
-from core.database import engine, init_db, AsyncSessionLocal, ProcessedEvent
+# Importăm modelele de bază, dar nu și engine-ul direct pentru a evita erorile de conexiune la import
+from schema.models import DailyPayload, MainEvent, SecondaryEvent
 from engine.scraper import WikiScraper
 from engine.processor import AIProcessor
 from engine.ranker import ScoringEngine
-from schema.models import DailyPayload, MainEvent, SecondaryEvent
 from tenacity import retry, stop_after_attempt, wait_fixed
 
 logger = setup_logger("MainPipeline")
 
-
-# --- 1. BRIDGE FUNCTIONS (Zero Circular Imports) ---
+# --- 1. BRIDGE FUNCTIONS (Fail-safe) ---
 
 async def save_event_content_safe(payload: DailyPayload):
-    """Saves backup locally only if DB is configured."""
+    """Saves backup locally only if DB is configured and available."""
     if not config.DATABASE_URL:
-        logger.info("ℹ️ Database Optional: Skipping local backup.")
         return
 
     try:
+        # Importăm componentele de DB doar aici (Lazy Import)
+        from core.database import AsyncSessionLocal, ProcessedEvent
         async with AsyncSessionLocal() as session:
             async with session.begin():
                 main = payload.main_event
@@ -39,7 +40,7 @@ async def save_event_content_safe(payload: DailyPayload):
             await session.commit()
         logger.info(f"🏛️ Local archive saved for year {main.year}.")
     except Exception as e:
-        logger.warning(f"⚠️ Local backup failed (non-critical): {e}")
+        logger.warning(f"⚠️ Local DB backup skipped/failed: {e}")
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(5))
@@ -49,7 +50,6 @@ async def send_to_java(payload: DailyPayload):
         "X-Internal-Api-Key": config.INTERNAL_API_SECRET,
         "Content-Type": "application/json"
     }
-    # Important: model_dump(mode='json') ensures dates and enums are stringified correctly
     payload_json = payload.model_dump(mode='json')
 
     async with httpx.AsyncClient(timeout=120.0) as client:
@@ -63,57 +63,55 @@ async def send_to_java(payload: DailyPayload):
         return response.status_code
 
 
-# --- 2. MAIN PIPELINE (Elite Performance) ---
+# --- 2. MAIN PIPELINE ---
 
 async def main():
-    logger.info("🚀 Starting Elite Pipeline (Async Parallel Mode)...")
+    logger.info("🚀 Starting Elite Pipeline (DB-Optional Mode)...")
 
-    # Inițializare DB doar dacă URL-ul există
+    # Inițializăm DB doar dacă avem string-ul de conexiune
     if config.DATABASE_URL:
         try:
+            from core.database import init_db
             await init_db()
+            logger.info("✅ Database initialized.")
         except Exception as e:
-            logger.warning(f"⚠️ Database init failed: {e}")
+            logger.error(f"❌ DB Init Error (checking if server is up): {e}")
     else:
-        logger.info("ℹ️ No DATABASE_URL found. Running in DB-less mode.")
+        logger.warning("ℹ️ DATABASE_URL is missing. Pipeline will run without local storage.")
 
     try:
         scraper = WikiScraper()
         processor = AIProcessor()
         ranker = ScoringEngine()
 
-        # STEP 1 & 2: FETCH & PRE-SCREEN
+        # STEP 1: FETCH
         raw_events = await scraper.fetch_today()
         if not raw_events:
-            raise ValueError("Wikipedia returned no events for today.")
+            raise ValueError("Wikipedia returned no events.")
 
+        # STEP 2: RANKING
         for item in raw_events:
             item['h_score'] = ranker.heuristic_score(item)
 
         candidates = sorted(raw_events, key=lambda x: x['h_score'], reverse=True)[:config.MAX_CANDIDATES_FOR_AI]
 
-        # STEP 3: PARALLEL ENRICHMENT
-        logger.info(f"📊 Fetching page views for {len(candidates)} candidates...")
-        view_tasks = []
-        for item in candidates:
-            p = item.get("pages", [])
-            slug = p[0].get("titles", {}).get("canonical") if p else None
-            item['slug'] = slug
-            view_tasks.append(scraper.fetch_page_views(slug))
-
+        # STEP 3: VIEWS
+        logger.info(f"📊 Analyzing {len(candidates)} candidates for popularity...")
+        view_tasks = [scraper.fetch_page_views(item.get('slug')) for item in candidates]
         views_results = await asyncio.gather(*view_tasks, return_exceptions=True)
+
         for item, result in zip(candidates, views_results):
             item['views'] = result if isinstance(result, int) else 0
 
-        # STEP 4: AI BATCH ANALYSIS
-        logger.info("🤖 AI Categorizing and Scoring...")
+        # STEP 4: AI SELECTION
+        logger.info("🤖 AI is selecting the best tech/science events...")
         ai_data = await processor.batch_score_and_categorize(candidates)
         results = ai_data.get('results', {})
 
-        # STEP 5: HYBRID RANKING
+        # STEP 5: FINAL SCORING
         for idx, item in enumerate(candidates):
-            res = results.get(f"ID_{idx}", {"score": 50, "category": "politics", "titles": {}})
-            item['category'] = res.get('category', 'politics')
+            res = results.get(f"ID_{idx}", {"score": 50, "category": "culture", "titles": {}})
+            item['category'] = res.get('category', 'culture')
             item['ai_impact'] = res.get('score', 50)
             item['titles'] = res.get('titles', {})
             item['final_score'] = ranker.calculate_final_score(item['h_score'], item['ai_impact'], item.get('views', 0))
@@ -121,11 +119,11 @@ async def main():
         candidates.sort(key=lambda x: x.get('final_score', 0), reverse=True)
         top_data = candidates[0]
 
-        # STEP 6: PREMIUM CONTENT
-        logger.info(f"✨ Generating Narrative for {top_data['year']} ({top_data['category']})")
+        # STEP 6: CONTENT GENERATION
+        logger.info(f"✨ Generating Premium Content: {top_data['year']} ({top_data['category']})")
         main_content = await processor.generate_multilingual_main_event(top_data)
 
-        # Media uploads
+        # Images
         slug_main = top_data.get('slug') or "history"
         wiki_imgs = await scraper.fetch_gallery_urls(slug_main, limit=3)
         main_gallery_tasks = [
@@ -137,13 +135,7 @@ async def main():
         secondary_objs = []
         for idx, item in enumerate(candidates[1:6]):
             slug_sec = item.get('slug')
-            thumb = None
-            if slug_sec:
-                imgs_sec = await scraper.fetch_gallery_urls(slug_sec, limit=1)
-                if imgs_sec:
-                    thumb = await asyncio.to_thread(scraper.upload_to_cloudinary, imgs_sec[0],
-                                                    f"sec_{item['year']}_{idx}")
-
+            thumb = await asyncio.to_thread(scraper.upload_to_cloudinary, "https://via.placeholder.com/150", f"sec_{idx}")
             secondary_objs.append(SecondaryEvent(
                 title_translations=item.get('titles', {}),
                 year=item['year'],
@@ -152,7 +144,7 @@ async def main():
                 thumbnail_url=thumb
             ))
 
-        # STEP 7: PAYLOAD ASSEMBLY
+        # STEP 7: PAYLOAD
         payload = DailyPayload(
             date_processed=datetime.now().date(),
             api_secret=config.INTERNAL_API_SECRET,
@@ -169,48 +161,41 @@ async def main():
             secondary_events=secondary_objs
         )
 
-        # --- INSPECTOR LOG ---
-        display_payload = payload.model_dump(mode='json')
-        payload_size_kb = len(json.dumps(display_payload)) / 1024
-        display_payload['api_secret'] = "********HIDDEN********"
-
-        for lang in display_payload['main_event']['narrative_translations']:
-            text = display_payload['main_event']['narrative_translations'][lang]
-            display_payload['main_event']['narrative_translations'][lang] = text[:100] + "..." if len(text) > 100 else text
+        # --- INSPECTOR (Safe & Clean) ---
+        display = payload.model_dump(mode='json')
+        display['api_secret'] = "********"
+        for lang in display['main_event']['narrative_translations']:
+            display['main_event']['narrative_translations'][lang] = display['main_event']['narrative_translations'][lang][:70] + "..."
 
         print("\n" + "═" * 60)
-        print(f"🔍 PAYLOAD INSPECTOR | Size: {payload_size_kb:.2f} KB")
-        print(f"📊 Main Category: {top_data['category'].upper()}")
-        print("═" * 60)
-        print(json.dumps(display_payload, indent=4, ensure_ascii=False))
+        print(f"🔍 PAYLOAD | Category: {top_data['category'].upper()} | Score: {top_data['final_score']}")
+        print(json.dumps(display, indent=4, ensure_ascii=False))
         print("═" * 60 + "\n")
 
-        # --- STEP 8: SAVE & TRANSMIT ---
-        # Salvăm backup-ul JSON local (faptul că nu ai DB face acest backup și mai important pentru debug)
-        backup_filename = f"backup_{payload.date_processed}.json"
-        with open(backup_filename, "w", encoding="utf-8") as f:
+        # --- STEP 8: TRANSMIT ---
+        backup_file = f"backup_{payload.date_processed}.json"
+        with open(backup_file, "w", encoding="utf-8") as f:
             json.dump(payload.model_dump(mode='json'), f, ensure_ascii=False, indent=4)
-        logger.info(f"💾 Local JSON backup saved to {backup_filename}")
 
-        # Salvare în DB (va da skip automat dacă config.DATABASE_URL e None)
         await save_event_content_safe(payload)
 
-        # Ingestie Java
         try:
-            status_code = await send_to_java(payload)
-            if status_code in [200, 201]:
-                logger.info(f"✅ SUCCESS: Ingested to Java (Status {status_code})")
-                import os
-                if os.path.exists(backup_filename):
-                    os.remove(backup_filename)
+            status = await send_to_java(payload)
+            if status in [200, 201]:
+                logger.info(f"✅ SUCCESS: Ingested to Java (Status {status})")
+                if os.path.exists(backup_file): os.remove(backup_file)
         except Exception as e:
-            logger.error(f"❌ Java Ingestion Failed: {e}")
-            logger.warning(f"⚠️ Check {backup_filename} for the generated content.")
+            logger.error(f"❌ Java Fail: {e}")
 
     except Exception as e:
-        logger.error(f"🚨 Pipeline Crash: {e}", exc_info=True)
+        logger.error(f"🚨 Crash: {e}", exc_info=True)
     finally:
-        # Dispose engine doar dacă a fost creat
-        if config.DATABASE_URL and engine:
-            await engine.dispose()
-            logger.info("🔌 DB Connections closed.")
+        if config.DATABASE_URL:
+            try:
+                from core.database import engine
+                await engine.dispose()
+                logger.info("🔌 DB closed.")
+            except: pass
+
+if __name__ == "__main__":
+    asyncio.run(main())
