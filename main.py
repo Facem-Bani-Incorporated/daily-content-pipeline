@@ -150,20 +150,19 @@ async def main():
         # --- STEP 8: FINAL PAYLOAD ---
         payload = DailyPayload(
             date_processed=datetime.now().date(),
-            api_secret=config.INTERNAL_API_SECRET,
+            api_secret=config.INTERNAL_API_SECRET,  # ASIGURĂ-TE CĂ ACESTA EXISTĂ
             main_event=MainEvent(
                 category=top_data['category'],
                 page_views_30d=top_data.get('views', 0),
                 title_translations=Translations(**main_content.get('titles', empty_translations)),
                 year=top_data['year'],
                 source_url=f"https://en.wikipedia.org/wiki/{slug_main}",
-                event_date=datetime.now().date(),
+                event_date=datetime.now().date(),  # CÂMPUL LIPSĂ
                 narrative_translations=Translations(**main_content.get('narratives', empty_translations)),
                 impact_score=top_data['final_score'],
                 gallery=main_gallery
             ),
-            secondary_events=secondary_objs,
-            metadata={}
+            secondary_events=secondary_objs
         )
 
         # --- STEP 9: INSPECTION & TRANSMISSION ---
