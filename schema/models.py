@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
 from datetime import date
+from enum import Enum
 class EventCategory(str, Enum):
     WAR = "war"
     TECHNOLOGY = "technology"
