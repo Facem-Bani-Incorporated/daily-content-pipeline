@@ -11,27 +11,24 @@ class AIProcessor:
         self.categories = [c.value for c in EventCategory]
 
     async def batch_score_and_categorize(self, candidates: list):
-        """Pasul 1: Clasificare și Scroring inițial."""
         candidates_text = "\n".join([
             f"ID_{i}: ({item['year']}) {item['text'][:200]}"
             for i, item in enumerate(candidates)
         ])
 
         prompt = f"""
-        Return ONLY a JSON object. 
-        List of allowed categories: {self.categories}.
-
-        TASK:
-        1. Categorize each ID using the list above.
-        2. Score impact (0-100).
-        3. Create engaging TITLES in: en, ro, es, de, fr.
+        Return ONLY a JSON object. Allowed categories: {self.categories}.
+        For each ID, provide:
+        1. 'category': exactly one from the list.
+        2. 'score': historical impact 0-100.
+        3. 'titles': translations in en, ro, es, de, fr.
 
         JSON STRUCTURE:
         {{
             "results": {{
                 "ID_0": {{
-                    "category": "science",
-                    "score": 95,
+                    "category": "politics",
+                    "score": 90,
                     "titles": {{ "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..." }}
                 }}
             }}
@@ -42,12 +39,13 @@ class AIProcessor:
         return await self._safe_groq_call(prompt, "Batch Analysis", {"results": {}})
 
     async def generate_multilingual_main_event(self, event_data: dict):
-        """Pasul 2: Narațiune Premium 400 cuvinte."""
+        # Am schimbat structura sa returneze 'narratives' direct pentru Translations(**narratives)
         prompt = f"""
-        Write a professional history narrative of EXACTLY 400 words for EACH language: en, ro, es, de, fr.
+        Write a professional history narrative of EXACTLY 400 words per language.
         Topic: {event_data.get('text')} ({event_data.get('year')}).
+        Languages: en, ro, es, de, fr.
 
-        CRITICAL: All languages must have equal length and detail. Do not summarize.
+        CRITICAL: Each narrative must be at least 400 words. Do not summarize.
 
         JSON STRUCTURE:
         {{
@@ -58,24 +56,21 @@ class AIProcessor:
         return await self._safe_groq_call(prompt, "Main Event", {"titles": {}, "narratives": {}})
 
     async def generate_secondary_narratives(self, secondary_candidates: list):
-        """Pasul 3: Narațiuni 200 cuvinte pentru evenimentele secundare."""
         formatted_list = "\n".join([
             f"EVENT_{i}: ({item['year']}) {item['text']}"
             for i, item in enumerate(secondary_candidates)
         ])
 
         prompt = f"""
-        Return ONLY JSON. For each EVENT_ID, write a 200-word narrative in: en, ro, es, de, fr.
-        Minimum 150 words per language. Equal detail for Romanian and Spanish.
-
-        INPUT:
-        {formatted_list}
+        For each EVENT_ID, write a 200-word narrative in: en, ro, es, de, fr.
 
         JSON STRUCTURE:
         {{
-            "EVENT_0": {{ "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..." }}
+            "EVENT_0": {{ "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..." }},
+            "EVENT_1": {{ "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..." }}
         }}
         """
+        # Fallback-ul trebuie sa fie un dictionar gol pentru a evita erori de iterare
         return await self._safe_groq_call(prompt, "Secondary Narratives", {})
 
     async def _safe_groq_call(self, prompt, context, fallback):
@@ -84,11 +79,11 @@ class AIProcessor:
                 model=self.model,
                 messages=[
                     {"role": "system",
-                     "content": "You are a rigid historian API. You only output valid, high-quality JSON."},
+                     "content": "You are a rigid historian API. You only output valid JSON. You never add prose outside the JSON."},
                     {"role": "user", "content": prompt}
                 ],
                 response_format={"type": "json_object"},
-                temperature=0.2
+                temperature=0.1  # Scazut pentru maxima precizie
             )
             return json.loads(completion.choices[0].message.content)
         except Exception as e:
