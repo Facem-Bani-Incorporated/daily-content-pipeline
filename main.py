@@ -166,6 +166,11 @@ async def main():
 
         # --- STEP 8: EXPORT FULL REPORT TO TXT ---
         report_file = f"full_output_{payload.date_processed}.txt"
+
+        # Extragem dicționarele din obiectele Pydantic pentru a putea folosi .items()
+        narratives_dict = payload.main_event.narrative_translations.model_dump()
+        titles_dict = payload.main_event.title_translations.model_dump()
+
         with open(report_file, "w", encoding="utf-8") as f:
             f.write("═" * 60 + "\n")
             f.write(f"🚀 PIPELINE FULL REPORT: {payload.date_processed}\n")
@@ -174,12 +179,16 @@ async def main():
             f.write(f"TOTAL SCORE: {payload.main_event.impact_score}\n\n")
 
             f.write("--- FULL NARRATIVES (All Languages) ---\n")
-            for lang, text in payload.main_event.narrative_translations.items():
+            # ACUM folosim variabila transformată în dict
+            for lang, text in narratives_dict.items():
                 f.write(f"\n[{lang.upper()}]:\n{text}\n")
 
             f.write("\n" + "--- SECONDARY EVENTS ---\n")
             for sec in payload.secondary_events:
-                f.write(f"• {sec.year}: {sec.title_translations.get('en')} (Score: {sec.ai_relevance_score})\n")
+                # Și aici transformăm title_translations dacă e model Pydantic
+                sec_titles = sec.title_translations.model_dump() if hasattr(sec.title_translations,
+                                                                            'model_dump') else sec.title_translations
+                f.write(f"• {sec.year}: {sec_titles.get('en')} (Score: {sec.ai_relevance_score})\n")
 
             f.write("\n" + "═" * 60 + "\n")
             f.write("RAW JSON PAYLOAD:\n")
@@ -190,9 +199,15 @@ async def main():
         # --- STEP 9: MINIMALIST CONSOLE LOG ---
         display = payload.model_dump(mode='json')
         display['api_secret'] = "********"
-        for lang in display['main_event']['narrative_translations']:
-            display['main_event']['narrative_translations'][lang] = display['main_event']['narrative_translations'][
-                                                                        lang][:70] + "..."
+
+        # Pydantic model_dump(mode='json') returnează deja dict, deci aici e safe:
+        main_ev = display.get('main_event', {})
+        narratives = main_ev.get('narrative_translations', {})
+
+        for lang in narratives:
+            val = narratives[lang]
+            if isinstance(val, str):
+                narratives[lang] = val[:70] + "..."
 
         print("\n" + "═" * 60)
         print(f"🔍 CONSOLE PREVIEW (Full data available in {report_file})")
