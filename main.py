@@ -59,124 +59,92 @@ def print_full_inspection(payload: DailyPayload):
 # --- 2. MAIN PIPELINE ---
 
 async def main():
-    logger.info("🚀 Starting Elite Pipeline (Robust Mode)...")
-    empty_translations = {"en": "", "ro": "", "es": "", "de": "", "fr": ""}
+    logger.info("🚀 Starting Daily Pipeline...")
+    # Fallback default pentru a preveni erorile de tip None/Empty
+    default_langs = {l: "Information pending translation..." for l in ["en", "ro", "es", "de", "fr"]}
 
     try:
         scraper = WikiScraper()
         processor = AIProcessor()
         ranker = ScoringEngine()
 
-        # STEP 1: FETCH
+        # 1. FETCH & INITIAL RANKING
         raw_events = await scraper.fetch_today()
-        if not raw_events:
-            raise ValueError("Wikipedia returned no events.")
-
-        # STEP 2: PRE-RANKING (Heuristics)
         for item in raw_events:
             item['h_score'] = ranker.heuristic_score(item)
 
         candidates = sorted(raw_events, key=lambda x: x['h_score'], reverse=True)[:config.MAX_CANDIDATES_FOR_AI]
 
-        # STEP 3: PAGE VIEWS
-        logger.info(f"📊 Fetching popularity data for top {len(candidates)} candidates...")
-        view_tasks = [scraper.fetch_page_views(item.get('slug')) for item in candidates]
-        views_results = await asyncio.gather(*view_tasks, return_exceptions=True)
-
-        for item, result in zip(candidates, views_results):
-            item['views'] = result if isinstance(result, int) else 0
-
-        # STEP 4: AI SELECTION & BATCH CATEGORIZATION
-        logger.info("🤖 AI is analyzing candidates and categorizing...")
+        # 2. AI BATCH (Titles & Categories)
         ai_data = await processor.batch_score_and_categorize(candidates)
         results = ai_data.get('results', {})
 
-        # STEP 5: HYBRID SCORING
         for idx, item in enumerate(candidates):
-            res = results.get(f"ID_{idx}", {"score": 50, "category": "culture"})
-
-            # Mapare categorie către Enum-ul tău
-            try:
-                item['category'] = EventCategory(res.get('category', 'culture').lower())
-            except ValueError:
-                item['category'] = EventCategory.CULTURE
-
+            res = results.get(f"ID_{idx}", {})
+            item['category'] = res.get('category', 'culture')
             item['ai_impact'] = res.get('score', 50)
-            item['titles'] = res.get('titles', empty_translations)
-            item['final_score'] = ranker.calculate_final_score(item['h_score'], item['ai_impact'], item.get('views', 0))
+            item['titles'] = res.get('titles', default_langs)
+            item['final_score'] = ranker.calculate_final_score(item['h_score'], item['ai_impact'], 0)
 
-        # Sortăm pentru a extrage elitele
         candidates.sort(key=lambda x: x.get('final_score', 0), reverse=True)
 
-        # --- STEP 6: MAIN EVENT CONTENT ---
+        # 3. MAIN EVENT GENERATION
         top_data = candidates[0]
-        logger.info(f"✨ Generating Premium Main Event (400 words) for {top_data['year']}...")
         main_content = await processor.generate_multilingual_main_event(top_data)
 
-        # Upload Main Gallery
-        slug_main = top_data.get('slug') or "history"
+        # Galerie Main
+        slug_main = top_data.get('slug', 'history')
         wiki_imgs = await scraper.fetch_gallery_urls(slug_main, limit=3)
-        main_gallery_tasks = [
-            asyncio.to_thread(scraper.upload_to_cloudinary, url, f"main_{top_data['year']}_{i}")
-            for i, url in enumerate(wiki_imgs)
-        ]
-        main_gallery = [img for img in await asyncio.gather(*main_gallery_tasks) if img]
+        main_gallery = []
+        for i, url in enumerate(wiki_imgs):
+            up_url = await asyncio.to_thread(scraper.upload_to_cloudinary, url, f"main_{top_data['year']}_{i}")
+            if up_url: main_gallery.append(up_url)
 
-        # --- STEP 7: SECONDARY EVENTS & MEDIUM NARRATIVES ---
+        # 4. SECONDARY EVENTS GENERATION
         secondary_pool = candidates[1:6]
-        logger.info(f"✍️ Generating 200-word narratives for {len(secondary_pool)} secondary events...")
         sec_narratives_map = await processor.generate_secondary_narratives(secondary_pool)
 
         secondary_objs = []
         for idx, item in enumerate(secondary_pool):
+            # Mapare sigură: AI folosește EVENT_0, EVENT_1...
             key = f"EVENT_{idx}"
-            narratives = sec_narratives_map.get(key, empty_translations)
+            narratives = sec_narratives_map.get(key, default_langs)
 
-            # Imagine secundară
+            # Imagine Secundară
             raw_thumb = item.get('wiki_thumb') or "https://images.unsplash.com/photo-1447069387593-a5de0862481e?w=400"
             thumb_url = await asyncio.to_thread(scraper.upload_to_cloudinary, raw_thumb, f"sec_{item['year']}_{idx}")
 
-            # Construim obiectul SecondaryEvent (validat de Pydantic)
-            sec_objs = SecondaryEvent(
-                title_translations=Translations(**item.get('titles', empty_translations)),
+            secondary_objs.append(SecondaryEvent(
+                title_translations=Translations(**item.get('titles', default_langs)),
                 year=item['year'],
                 source_url=f"https://en.wikipedia.org/wiki/{item.get('slug', '')}",
                 thumbnail_url=thumb_url,
-                ai_relevance_score=item.get('final_score', 0),
+                ai_relevance_score=float(item.get('final_score', 0)),
                 narrative_translations=Translations(**narratives)
-            )
-            secondary_objs.append(sec_objs)
+            ))
 
-        # --- STEP 8: FINAL PAYLOAD ---
+        # 5. ASAMBLARE PAYLOAD (Respectă perfect modelul tău)
         payload = DailyPayload(
             date_processed=datetime.now().date(),
-            api_secret=config.INTERNAL_API_SECRET,  # ASIGURĂ-TE CĂ ACESTA EXISTĂ
+            api_secret=config.INTERNAL_API_SECRET,
             main_event=MainEvent(
-                category=top_data['category'],
+                category=EventCategory(top_data['category'].lower()),
                 page_views_30d=top_data.get('views', 0),
-                title_translations=Translations(**main_content.get('titles', empty_translations)),
+                title_translations=Translations(**main_content.get('titles', default_langs)),
                 year=top_data['year'],
                 source_url=f"https://en.wikipedia.org/wiki/{slug_main}",
-                event_date=datetime.now().date(),  # CÂMPUL LIPSĂ
-                narrative_translations=Translations(**main_content.get('narratives', empty_translations)),
-                impact_score=top_data['final_score'],
+                event_date=datetime.now().date(),
+                narrative_translations=Translations(**main_content.get('narratives', default_langs)),
+                impact_score=float(top_data['final_score']),
                 gallery=main_gallery
             ),
             secondary_events=secondary_objs
         )
 
-        # --- STEP 9: INSPECTION & TRANSMISSION ---
-        full_json = payload.model_dump_json(indent=4)  # indent=4 îl face ușor de citit
-        print("\n🔥 DEBUG FULL JSON PAYLOAD START 🔥")
-        print(full_json)
-        print("🔥 DEBUG FULL JSON PAYLOAD END 🔥\n")
-
-        try:
-            status = await send_to_java(payload)
-            logger.info(f"✅ SUCCESS: Java received data (Status {status})")
-        except Exception as e:
-            logger.error(f"❌ Java Transfer Failed: {e}")
-            # Nu dăm crash aici, ca să vedem restul logurilor
+        # 6. SEND TO JAVA
+        logger.info("📡 Sending Final Validated Payload to Backend...")
+        status = await send_to_java(payload)
+        logger.info(f"✅ Pipeline Completed Successfully (Status {status})")
 
     except Exception as e:
         logger.error(f"🚨 Pipeline Crash: {e}", exc_info=True)
