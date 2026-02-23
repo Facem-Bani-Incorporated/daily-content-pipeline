@@ -13,15 +13,15 @@ from tenacity import retry, stop_after_attempt, wait_fixed
 logger = setup_logger("MainPipeline")
 
 
-# --- 1. BRIDGE FUNCTIONS ---
+# --- 1. FUNCTII DE UTILITATE ---
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(5))
 async def send_to_java(payload: DailyPayload):
+    """Trimite payload-ul către backend-ul Java."""
     headers = {
         "X-Internal-Api-Key": config.INTERNAL_API_SECRET,
         "Content-Type": "application/json"
     }
-    # mode='json' transformă totul (date, enums) în formate primitive compatibile JSON
     payload_json = payload.model_dump(mode='json')
 
     async with httpx.AsyncClient(timeout=180.0) as client:
@@ -31,88 +31,83 @@ async def send_to_java(payload: DailyPayload):
         return response.status_code
 
 
-def print_full_inspection(payload: DailyPayload):
-    """Afișează absolut tot conținutul JSON-ului pentru inspecție vizuală."""
-    print("\n" + "🔍" + " VALIDARE PAYLOAD COMPLET " + "=" * 40)
-
-    # Main Event info
-    me = payload.main_event
-    print(f"\n🌟 MAIN EVENT [{me.year}]")
-    print(f"   📂 Categorie: {me.category.value.upper()}")
-    print(f"   🎯 Scor Impact: {me.impact_score}")
-    print(f"   📈 Views (30d): {me.page_views_30d}")
-    print(f"   📝 Titlu RO: {me.title_translations.ro}")
-    print(f"   📖 Narativ RO (primele 150 ch): {me.narrative_translations.ro[:150]}...")
-    print(f"   🖼️ Galerie: {me.gallery}")
-
-    print(f"\n🔗 EVENIMENTE SECUNDARE ({len(payload.secondary_events)}):")
-    for idx, sec in enumerate(payload.secondary_events):
-        print(f"   {idx + 1}. [{sec.year}] {sec.title_translations.ro}")
-        print(f"      📊 Scor: {sec.ai_relevance_score}")
-        print(f"      📜 Narativ RO (150-250 cuv): {sec.narrative_translations.ro[:120]}...")
-        print(f"      🔗 URL: {sec.source_url}")
-        print(f"      🖼️ Thumb: {sec.thumbnail_url}")
-
-    print("\n" + "=" * 65 + "\n")
+async def safe_upload(scraper, url, folder_name):
+    """Upload securizat către Cloudinary (nu oprește pipeline-ul la eroare)."""
+    try:
+        return await asyncio.to_thread(scraper.upload_to_cloudinary, url, folder_name)
+    except Exception as e:
+        logger.warning(f"⚠️ Cloudinary Upload Failed for {url}: {e}")
+        return None
 
 
-# --- 2. MAIN PIPELINE ---
+# --- 2. PIPELINE-UL PRINCIPAL ---
 
 async def main():
-    logger.info("🚀 Starting Daily Pipeline...")
-    # Fallback default pentru a preveni erorile de tip None/Empty
-    default_langs = {l: "Information pending translation..." for l in ["en", "ro", "es", "de", "fr"]}
+    logger.info("🚀 Starting Elite Daily Pipeline...")
+    default_langs = {l: "Translation in progress..." for l in ["en", "ro", "es", "de", "fr"]}
+
+    scraper = WikiScraper()
+    processor = AIProcessor()
+    ranker = ScoringEngine()
 
     try:
-        scraper = WikiScraper()
-        processor = AIProcessor()
-        ranker = ScoringEngine()
-
-        # 1. FETCH & INITIAL RANKING
+        # STEP 1: FETCH EVENIMENTE
         raw_events = await scraper.fetch_today()
+        if not raw_events:
+            logger.error("❌ No events found on Wikipedia!")
+            return
+
+        # STEP 2: SCORING HEURISTIC & FILTRARE INITIALA
         for item in raw_events:
             item['h_score'] = ranker.heuristic_score(item)
 
         candidates = sorted(raw_events, key=lambda x: x['h_score'], reverse=True)[:config.MAX_CANDIDATES_FOR_AI]
 
-        # 2. AI BATCH (Titles & Categories)
+        # STEP 3: ANALIZA AI BATCH (Categorii și Titluri)
+        logger.info(f"🤖 AI analyzing {len(candidates)} candidates...")
         ai_data = await processor.batch_score_and_categorize(candidates)
         results = ai_data.get('results', {})
 
+        # STEP 4: FETCH PAGE VIEWS (Paralel pentru viteză)
+        view_tasks = [scraper.fetch_page_views(c.get('slug')) for c in candidates]
+        views = await asyncio.gather(*view_tasks)
+
         for idx, item in enumerate(candidates):
             res = results.get(f"ID_{idx}", {})
+            item['views'] = views[idx] if isinstance(views[idx], int) else 0
             item['category'] = res.get('category', 'culture')
             item['ai_impact'] = res.get('score', 50)
             item['titles'] = res.get('titles', default_langs)
-            item['final_score'] = ranker.calculate_final_score(item['h_score'], item['ai_impact'], 0)
+            item['final_score'] = ranker.calculate_final_score(item['h_score'], item['ai_impact'], item['views'])
 
+        # Sortăm elitele: Locul 1 = Main, Locurile 2-6 = Secondary
         candidates.sort(key=lambda x: x.get('final_score', 0), reverse=True)
 
-        # 3. MAIN EVENT GENERATION
+        # STEP 5: GENERARE CONTINUT PREMIUM (MAIN EVENT)
         top_data = candidates[0]
-        main_content = await processor.generate_multilingual_main_event(top_data)
+        main_content_task = processor.generate_multilingual_main_event(top_data)
 
-        # Galerie Main
+        # Galerie Main (Fetch & Upload)
         slug_main = top_data.get('slug', 'history')
         wiki_imgs = await scraper.fetch_gallery_urls(slug_main, limit=3)
-        main_gallery = []
-        for i, url in enumerate(wiki_imgs):
-            up_url = await asyncio.to_thread(scraper.upload_to_cloudinary, url, f"main_{top_data['year']}_{i}")
-            if up_url: main_gallery.append(up_url)
+        img_tasks = [safe_upload(scraper, url, f"main_{top_data['year']}_{i}") for i, url in enumerate(wiki_imgs)]
 
-        # 4. SECONDARY EVENTS GENERATION
+        # Așteptăm AI-ul și Imaginile în paralel
+        main_content, *main_gallery_results = await asyncio.gather(main_content_task, *img_tasks)
+        main_gallery = [img for img in main_gallery_results if img]
+
+        # STEP 6: GENERARE NARAȚIUNI SECUNDARE
         secondary_pool = candidates[1:6]
         sec_narratives_map = await processor.generate_secondary_narratives(secondary_pool)
 
         secondary_objs = []
         for idx, item in enumerate(secondary_pool):
-            # Mapare sigură: AI folosește EVENT_0, EVENT_1...
             key = f"EVENT_{idx}"
             narratives = sec_narratives_map.get(key, default_langs)
 
-            # Imagine Secundară
+            # Thumbnail secundar
             raw_thumb = item.get('wiki_thumb') or "https://images.unsplash.com/photo-1447069387593-a5de0862481e?w=400"
-            thumb_url = await asyncio.to_thread(scraper.upload_to_cloudinary, raw_thumb, f"sec_{item['year']}_{idx}")
+            thumb_url = await safe_upload(scraper, raw_thumb, f"sec_{item['year']}_{idx}")
 
             secondary_objs.append(SecondaryEvent(
                 title_translations=Translations(**item.get('titles', default_langs)),
@@ -123,7 +118,7 @@ async def main():
                 narrative_translations=Translations(**narratives)
             ))
 
-        # 5. ASAMBLARE PAYLOAD (Respectă perfect modelul tău)
+        # STEP 7: ASAMBLARE PAYLOAD FINAL
         payload = DailyPayload(
             date_processed=datetime.now().date(),
             api_secret=config.INTERNAL_API_SECRET,
@@ -141,10 +136,17 @@ async def main():
             secondary_events=secondary_objs
         )
 
-        # 6. SEND TO JAVA
-        logger.info("📡 Sending Final Validated Payload to Backend...")
-        status = await send_to_java(payload)
-        logger.info(f"✅ Pipeline Completed Successfully (Status {status})")
+        # STEP 8: SALVARE DEBUG & TRIMITERE
+        with open("last_payload_debug.json", "w", encoding="utf-8") as f:
+            json.dump(payload.model_dump(mode='json'), f, indent=4, ensure_ascii=False)
+
+        logger.info("💾 Local debug JSON saved. Attempting transmission...")
+
+        try:
+            status = await send_to_java(payload)
+            logger.info(f"✅ SUCCESS: Java received data (Status {status})")
+        except Exception as e:
+            logger.error(f"⚠️ Could not reach Java backend (URL: {config.JAVA_BACKEND_URL}). Error: {e}")
 
     except Exception as e:
         logger.error(f"🚨 Pipeline Crash: {e}", exc_info=True)
