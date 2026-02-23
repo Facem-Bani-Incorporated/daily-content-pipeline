@@ -5,28 +5,30 @@ from typing import Optional, List
 from core.config import config
 from core.logger import setup_logger
 from datetime import datetime, timedelta
-import httpx
-logger = setup_logger("Scraper")
 
+logger = setup_logger("Scraper")
 
 class WikiScraper:
     def __init__(self):
         self.headers = {"User-Agent": config.USER_AGENT}
-        # Cloudinary config rămâne la fel
+        # Configurare Cloudinary (asigură-te că ai config-ul încărcat)
+        cloudinary.config(
+            cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+            api_key=os.getenv("CLOUDINARY_API_KEY"),
+            api_secret=os.getenv("CLOUDINARY_API_SECRET")
+        )
 
     async def fetch_page_views(self, title_slug: str) -> int:
-        """Obține numărul de vizualizări pentru ultimele 30 de zile."""
         if not title_slug or title_slug == "history": return 0
 
-        # Generăm datele pentru ultima lună completă
-        end_date = datetime.now().replace(day=1) - timedelta(days=1)
-        start_date = end_date.replace(day=1)
+        # Luăm data de ieri pentru a asigura existența datelor
+        yesterday = datetime.now() - timedelta(days=1)
+        last_month = yesterday - timedelta(days=30)
 
-        start_str = start_date.strftime("%Y%m01")
-        end_str = end_date.strftime("%Y%m%d")
+        start_str = last_month.strftime("%Y%m%d")
+        end_str = yesterday.strftime("%Y%m%d")
 
-        # Endpoint-ul de Analytics de la Wikimedia (Atenție: user agents 'user' elimină botii)
-        url = f"https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/user/{title_slug}/monthly/{start_str}/{end_str}"
+        url = f"https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/user/{title_slug}/daily/{start_str}/{end_str}"
 
         async with httpx.AsyncClient(headers=self.headers, timeout=10.0) as client:
             try:
@@ -47,13 +49,26 @@ class WikiScraper:
                 response = await client.get(url)
                 response.raise_for_status()
                 data = response.json()
-                # Combinăm evenimentele selectate cu cele normale
-                return data.get('selected', []) + data.get('events', [])
-            except httpx.HTTPError as e:
-                logger.error(f"❌ Wiki API Network Error: {e}")
+                raw_events = data.get('selected', []) + data.get('events', [])
+
+                processed_events = []
+                for event in raw_events:
+                    # Wikipedia pune link-urile în lista 'pages'
+                    # Extragem primul slug valid pentru a avea source_url ulterior
+                    pages = event.get('pages', [])
+                    slug = pages[0].get('titles', {}).get('canonical') if pages else None
+                    thumbnail = pages[0].get('thumbnail', {}).get('source') if pages else None
+
+                    processed_events.append({
+                        "year": event.get('year'),
+                        "text": event.get('text'),
+                        "slug": slug,
+                        "wiki_thumb": thumbnail  # Îl păstrăm pentru upload ulterior
+                    })
+                return processed_events
             except Exception as e:
-                logger.error(f"❌ Wiki Unexpected Error: {e}")
-            return []
+                logger.error(f"❌ Wiki API Error: {e}")
+                return []
 
     async def fetch_gallery_urls(self, title_slug: str, limit: int = 5) -> List[str]:
         if not title_slug:
@@ -86,8 +101,8 @@ class WikiScraper:
         return image_urls
 
     def upload_to_cloudinary(self, image_url: str, public_id: str) -> Optional[str]:
-        if not image_url or "via.placeholder" in image_url:
-            return None
+        # Nu mai verificăm "via.placeholder" aici pentru că acum trimitem link-uri reale de la Wikipedia
+        if not image_url: return None
         try:
             result = cloudinary.uploader.upload(
                 image_url,
@@ -97,5 +112,5 @@ class WikiScraper:
             )
             return result.get('secure_url')
         except Exception as e:
-            logger.error(f"⚠️ Cloudinary Upload Fail ({public_id}): {e}")
+            logger.error(f"⚠️ Cloudinary Fail ({public_id}): {e}")
             return None

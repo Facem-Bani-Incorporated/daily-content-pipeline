@@ -132,40 +132,32 @@ async def main():
         candidates.sort(key=lambda x: x.get('final_score', 0), reverse=True)
         top_data = candidates[0]
 
-        # STEP 6: PREMIUM CONTENT GENERATION
-        logger.info(f"✨ Generating Premium Content for {top_data['year']} ({top_data['category'].value})")
-        main_content = await processor.generate_multilingual_main_event(top_data)
-
-        # Main Gallery Uploads
-        slug_main = top_data.get('slug') or "history"
-        wiki_imgs = await scraper.fetch_gallery_urls(slug_main, limit=3)
-        main_gallery_tasks = [
-            asyncio.to_thread(scraper.upload_to_cloudinary, url, f"main_{top_data['year']}_{i}")
-            for i, url in enumerate(wiki_imgs)
-        ]
-        main_gallery = await asyncio.gather(*main_gallery_tasks)
-
-        # Secondary Events (Top 5) & Summaries extraction
+        # --- MODIFICARE ÎN STEP 6: SECONDARY EVENTS ---
         secondary_objs = []
-        secondary_summaries_metadata = {}  # Aici stocăm rezumatele pentru metadata
+        secondary_summaries_metadata = {}
 
         for idx, item in enumerate(candidates[1:6]):
             slug_sec = item.get('slug')
-            thumb = await asyncio.to_thread(scraper.upload_to_cloudinary, "https://via.placeholder.com/300",
-                                            f"sec_{idx}")
+            # Folosim thumbnail-ul de la Wikipedia dacă există, altfel un fallback stabil
+            raw_img_url = item.get('wiki_thumb') or "https://images.unsplash.com/photo-1447069387593-a5de0862481e?w=400"
 
-            # Construim modelul respectând strict structura Pydantic
+            # Upload la Cloudinary
+            thumb = await asyncio.to_thread(
+                scraper.upload_to_cloudinary,
+                raw_img_url,
+                f"sec_{item['year']}_{idx}"
+            )
+
+            # Acum source_url va fi populat pentru că avem slug-ul extras corect
             sec_event = SecondaryEvent(
-                title_translations=item.get('titles'),
+                title_translations=item.get('titles', empty_translations),
                 year=item['year'],
-                source_url=f"https://en.wikipedia.org/wiki/{slug_sec}" if slug_sec else "",
+                source_url=f"https://en.wikipedia.org/wiki/{slug_sec}" if slug_sec else "https://en.wikipedia.org",
                 ai_relevance_score=item.get('final_score', 0),
                 thumbnail_url=thumb
             )
             secondary_objs.append(sec_event)
-
-            # Salvăm rezumatele asociindu-le cu anul evenimentului pentru front-end/java
-            secondary_summaries_metadata[f"year_{item['year']}"] = item.get('summaries')
+            secondary_summaries_metadata[f"year_{item['year']}"] = item.get('summaries', empty_translations)
 
         # STEP 7: PAYLOAD ASSEMBLY
         payload = DailyPayload(
