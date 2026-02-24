@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import datetime
 from groq import Groq
 from core.config import config
 from schema.models import EventCategory
@@ -11,26 +12,35 @@ class AIProcessor:
         self.model = model
         self.categories_list = [c.value for c in EventCategory]
         self.languages = ["en", "ro", "es", "de", "fr"]
+        # Ancora temporală: Azi
+        self.today_str = datetime.now().strftime("%d %B")
 
     async def batch_score_and_categorize(self, candidates: list):
-        """Scoring și clasificare inițială pentru tot batch-ul."""
+        """Primul pas: Filtrare și clasificare rapidă."""
         candidates_text = "\n".join(
-            [f"ID_{i}: ({item['year']}) {item['text'][:200]}" for i, item in enumerate(candidates)])
+            [f"ID_{i}: ({item['year']}) {item['text'][:250]}" for i, item in enumerate(candidates)])
 
         prompt = f"""
-        Analyze these historical events. 
+        TODAY IS: {self.today_str}.
+        Analyze these historical events occurred specifically on {self.today_str}.
+
         ALLOWED CATEGORIES: {self.categories_list}
 
-        For each ID, return a JSON object with:
-        1. category (from the allowed list)
-        2. score (0-100)
-        3. titles (dict with keys {self.languages})
-
+        For each ID, return JSON:
+        {{
+          "results": {{
+            "ID_0": {{
+              "category": "from_list",
+              "score": 0-100,
+              "titles": {{ "en": "...", "ro": "..." }}
+            }}
+          }}
+        }}
         INPUT: {candidates_text}
         """
         res = await self._safe_groq_call(prompt, "Batch Analysis", {"results": {}})
 
-        # Validare categorii pentru a preveni erori în Java
+        # Validare categorii
         results = res.get('results', {})
         for vid, data in results.items():
             if data.get('category') not in self.categories_list:
@@ -39,17 +49,25 @@ class AIProcessor:
         return {"results": results}
 
     async def generate_multilingual_main_event(self, event_data: dict):
-        """Generare narațiune lungă (400 cuvinte) pentru evenimentul principal."""
-        event_info = f"{event_data.get('year')} - {event_data.get('text')}"
+        """Modular: Generare narațiune extensivă pentru evenimentul principal."""
+        event_info = f"Year: {event_data.get('year')} | Event: {event_data.get('text')}"
 
-        # 1. Titluri finale
-        titles_prompt = f"Create 5 engaging historical titles for: {event_info} in {self.languages}. Root key: 'titles'."
-        titles_res = await self._safe_groq_call(titles_prompt, "Main Titles",
-                                                {"titles": {l: "History Event" for l in self.languages}})
+        # Pas 1: Titluri (asigurăm consistența)
+        titles = event_data.get('titles', {l: "History" for l in self.languages})
 
-        # 2. Narațiuni paralele
+        # Pas 2: Narațiuni paralele cu ancoră temporală strictă
         async def fetch_lang_narrative(lang):
-            prompt = f"Write a 400-word professional historical narrative in {lang.upper()} about: {event_info}. Return JSON: {{ 'content': 'text' }}"
+            prompt = f"""
+            TODAY IN HISTORY: {self.today_str}.
+            EVENT: {event_info}.
+
+            TASK: Write a 400-word historical narrative in {lang.upper()}.
+            STRICT RULES:
+            1. The event MUST be presented as occurring on {self.today_str}, {event_data.get('year')}.
+            2. DO NOT mention other dates like March 5th or March 16th as the primary date.
+            3. Focus on why THIS date ({self.today_str}) is important for this event.
+            4. Return ONLY JSON: {{ "content": "..." }}
+            """
             res = await self._safe_groq_call(prompt, f"Main {lang}", {"content": "Narrative pending..."})
             return lang, res.get("content", "Narrative pending...")
 
@@ -57,47 +75,54 @@ class AIProcessor:
         narrative_results = await asyncio.gather(*tasks)
 
         return {
-            "titles": titles_res.get('titles', {}),
+            "titles": titles,
             "narratives": dict(narrative_results)
         }
 
     async def generate_secondary_narratives(self, secondary_candidates: list):
+        """Modular: Generare narațiuni scurte pentru evenimentele secundare."""
+
+        async def process_single_secondary(idx, item):
+            # Procesăm fiecare eveniment secundar independent pentru a evita mixarea datelor
+            event_tasks = []
+            for lang in self.languages:
+                event_tasks.append(self._fetch_secondary_lang(idx, item, lang))
+
+            lang_results = await asyncio.gather(*event_tasks)
+            return f"EVENT_{idx}", dict(lang_results)
+
+        # Executăm procesarea modulară pentru toate evenimentele secundare
+        main_tasks = [process_single_secondary(i, item) for i, item in enumerate(secondary_candidates)]
+        final_results = await asyncio.gather(*main_tasks)
+
+        return dict(final_results)
+
+    async def _fetch_secondary_lang(self, idx, item, lang):
+        """Helper modular pentru o singură limbă per eveniment."""
+        event_info = f"{item['year']} - {item['text'][:300]}"
+        prompt = f"""
+        DATE: {self.today_str}.
+        SUMMARY (200 words) in {lang.upper()} for: {event_info}.
+        STRICT: Focus only on what happened on {self.today_str}.
+        JSON: {{ "content": "..." }}
         """
-        METODA LIPSA: Generare narațiuni scurte (200 cuvinte) pentru evenimentele secundare.
-        """
-        final_map = {f"EVENT_{i}": {} for i in range(len(secondary_candidates))}
-
-        async def fetch_sec_lang(idx, item, lang):
-            event_info = f"{item['year']} - {item['text'][:300]}"
-            prompt = f"Write a 200-word historical summary in {lang.upper()} for: {event_info}. Return JSON: {{ 'content': 'text' }}"
-            res = await self._safe_groq_call(prompt, f"Sec {idx} {lang}", {"content": "Data pending..."})
-            return idx, lang, res.get("content", "Data pending...")
-
-        # Generăm toate limbile pentru toate evenimentele în paralel (High Performance)
-        tasks = []
-        for i, item in enumerate(secondary_candidates):
-            for l in self.languages:
-                tasks.append(fetch_sec_lang(i, item, l))
-
-        results = await asyncio.gather(*tasks)
-
-        # Reconstruim maparea pentru pipeline
-        for idx, lang, text in results:
-            final_map[f"EVENT_{idx}"][lang] = text
-
-        return final_map
+        res = await self._safe_groq_call(prompt, f"Sec {idx} {lang}", {"content": "Data pending..."})
+        return lang, res.get("content", "Data pending...")
 
     async def _safe_groq_call(self, prompt, context, fallback):
-        """Apel securizat către Groq cu formatare JSON forțată."""
+        """Sistemul 'Fort Knox' pentru apeluri API."""
         try:
+            # Injectăm contextul de sistem pentru a preveni halucinațiile de dată
+            system_msg = f"You are a History Expert API. Today is {self.today_str}. You only output valid JSON."
+
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are a rigid History API. Output ONLY valid JSON."},
+                    {"role": "system", "content": system_msg},
                     {"role": "user", "content": prompt}
                 ],
                 response_format={"type": "json_object"},
-                temperature=0.0
+                temperature=0.0  # Zero creativitate, zero halucinații
             )
             return json.loads(completion.choices[0].message.content)
         except Exception as e:
