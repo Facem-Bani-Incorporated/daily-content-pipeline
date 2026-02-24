@@ -8,26 +8,37 @@ from engine.scraper import WikiScraper
 from engine.processor import AIProcessor
 from engine.ranker import ScoringEngine
 from schema.models import DailyPayload, EventDetail, EventCategory, Translations
-from tenacity import retry, stop_after_attempt, wait_fixed
 
 logger = setup_logger("MainPipeline")
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(5))
+# --- 1. FUNCTIE DE INGESTIE TOLERANTĂ LA ERORI ---
+
 async def send_to_java(payload: DailyPayload):
+    """Încearcă trimiterea, dar NU oprește pipeline-ul dacă backend-ul e offline."""
     headers = {
         "X-Internal-Api-Key": config.INTERNAL_API_SECRET,
         "Content-Type": "application/json"
     }
+    # mode='json' e critic pentru a converti obiectele Pydantic în JSON valid
     payload_json = payload.model_dump(mode='json')
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        logger.info(f"📤 Ingesting to Java: {config.JAVA_BACKEND_URL}")
-        response = await client.post(config.JAVA_BACKEND_URL, json=payload_json, headers=headers)
-        response.raise_for_status()
-        return response.status_code
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            logger.info(f"📤 Ingesting to Java: {config.JAVA_BACKEND_URL}")
+            response = await client.post(config.JAVA_BACKEND_URL, json=payload_json, headers=headers)
+
+            if response.status_code in [200, 201]:
+                logger.info("✅ Success! Java Backend a primit datele.")
+            else:
+                logger.warning(f"⚠️ Backend-ul a răspuns cu STATUS {response.status_code}. Posibil endpoint greșit.")
+        except Exception as e:
+            logger.error(f"❌ Conexiunea la Java eșuată (Offline/404). Detalii: {e}")
+            logger.info("💡 Sfat CTO: Verifică logurile lui Sergiu sau URL-ul din .env")
 
 
 async def safe_upload(scraper, url, folder_name):
+    """Upload către Cloudinary (non-blocking)."""
     try:
         return await asyncio.to_thread(scraper.upload_to_cloudinary, url, folder_name)
     except Exception as e:
@@ -35,8 +46,10 @@ async def safe_upload(scraper, url, folder_name):
         return None
 
 
+# --- 2. PIPELINE-UL PRINCIPAL ---
+
 async def main():
-    logger.info("🚀 Starting Elite Daily Pipeline (Uniform Mode)...")
+    logger.info("🚀 Starting Elite Daily Pipeline (Payload-First Mode)...")
     default_langs = {l: "Data pending..." for l in ["en", "ro", "es", "de", "fr"]}
 
     scraper = WikiScraper()
@@ -58,7 +71,6 @@ async def main():
         view_tasks = [scraper.fetch_page_views(c.get('slug')) for c in candidates]
         views = await asyncio.gather(*view_tasks)
 
-        # Merge data & final ranking
         for idx, item in enumerate(candidates):
             res = ai_results.get(f"ID_{idx}", {})
             item['views'] = views[idx] if isinstance(views[idx], int) else 0
@@ -69,7 +81,7 @@ async def main():
 
         candidates.sort(key=lambda x: x.get('final_score', 0), reverse=True)
 
-        # 4. Main Event - Deep Narrative & Gallery
+        # 4. Main Event Generation
         top_data = candidates[0]
         main_content = await processor.generate_multilingual_main_event(top_data)
 
@@ -90,7 +102,7 @@ async def main():
             gallery=main_gallery
         )
 
-        # 5. Secondary Events - Uniform Generation
+        # 5. Secondary Events Generation
         secondary_pool = candidates[1:6]
         sec_narratives_map = await processor.generate_secondary_narratives(secondary_pool)
         secondary_objs = []
@@ -98,8 +110,6 @@ async def main():
         for idx, item in enumerate(secondary_pool):
             key = f"EVENT_{idx}"
             narratives = sec_narratives_map.get(key, default_langs)
-
-            # Thumbnail logic (Treat secondary as a single-image gallery)
             raw_thumb = item.get('wiki_thumb') or "https://images.unsplash.com/photo-1447069387593-a5de0862481e?w=400"
             thumb_url = await safe_upload(scraper, raw_thumb, f"sec_{item['year']}_{idx}")
 
@@ -115,7 +125,7 @@ async def main():
                 gallery=[thumb_url] if thumb_url else []
             ))
 
-        # 6. Assemble & Dispatch
+        # 6. ASSEMBLE FINAL PAYLOAD
         payload = DailyPayload(
             date_processed=datetime.now().date(),
             api_secret=config.INTERNAL_API_SECRET,
@@ -124,7 +134,14 @@ async def main():
             metadata={"processed_candidates": len(candidates)}
         )
 
-        logger.info(f"✅ Payload Ready. Main Event: {main_event_obj.year}")
+        # 7. VIZUALIZARE PAYLOAD (CHIAR DACĂ BACKENDUL E PICAT)
+        print("\n" + "💎" * 15)
+        print("💎 FINAL GENERATED PAYLOAD 💎")
+        print("💎" * 15)
+        print(payload.model_dump_json(indent=4))
+        print("💎" * 15 + "\n")
+
+        # 8. Dispatch (Fără să crape main())
         await send_to_java(payload)
 
     except Exception as e:
