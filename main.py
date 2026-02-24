@@ -112,23 +112,16 @@ async def main():
                 metadata={"processed": len(candidates), "delivered": len(final_events_list)}
             )
 
-            # 6. LOGARE ATOMICĂ (Fără interferențe)
-            # Generăm JSON-ul compact ca să nu pună Railway timestamp pe fiecare rând
-            compact_json = payload.model_dump_json()
+            # 6. LOGARE CURATĂ (Soluția pentru erori vizuale)
+            # Generăm JSON-ul indentat pentru trimitere (dacă vrei) sau pentru un print curat
+            clean_json_pretty = payload.model_dump_json(indent=4)
 
-            # Printăm un bloc clar. Folosim un singur print pentru tot separatorul
-            # ca să forțăm consola să-l trateze ca pe un singur eveniment.
-            output = (
-                    "\n" + "=" * 60 + "\n"
-                                      "🚀 PIPELINE COMPLETE - GENERATED JSON:\n"
-                                      f"{compact_json}\n"
-                    + "=" * 60 + "\n"
-            )
+            # Folosim separatorul tău, dar printăm totul într-un singur bloc
+            print("\n" + "=" * 20 + " JSON START (NO SECRET) " + "=" * 20)
+            print(clean_json_pretty)
+            print("=" * 20 + " JSON END " + "=" * 20 + "\n")
 
-            # Această comandă va apărea o singură dată în loguri
-            print(output)
-
-            # 7. Dispatch către Java
+            # 7. Dispatch
             await send_to_java(payload)
 
     except Exception as e:
