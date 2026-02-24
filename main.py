@@ -105,21 +105,24 @@ async def main():
                 gallery=gallery
             ))
 
-        # 5. ASSEMBLE PAYLOAD (Fără api_secret în constructor)
-        payload = DailyPayload(
-            date_processed=datetime.now().date(),
-            events=final_events_list,
-            metadata={"processed_candidates": len(candidates), "count": len(final_events_list)}
-        )
+            # 5. ASAMBLARE PAYLOAD
+            payload = DailyPayload(
+                date_processed=datetime.now().date(),
+                events=final_events_list,
+                metadata={"processed": len(candidates), "delivered": len(final_events_list)}
+            )
 
-        # 6. LOGARE CURATĂ (Fără date sensibile în logurile Railway)
-        clean_json = payload.model_dump_json(indent=4)
-        logger.info(f"\n{'=' * 20} JSON START (NO SECRET) {'=' * 20}\n{clean_json}\n{'=' * 20} JSON END {'=' * 20}\n")
+            # 6. LOGARE CURATĂ (Soluția pentru erori vizuale)
+            # Generăm JSON-ul indentat pentru trimitere (dacă vrei) sau pentru un print curat
+            clean_json_pretty = payload.model_dump_json(indent=4)
 
-        await asyncio.sleep(1)
+            # Folosim separatorul tău, dar printăm totul într-un singur bloc
+            print("\n" + "=" * 20 + " JSON START (NO SECRET) " + "=" * 20)
+            print(clean_json_pretty)
+            print("=" * 20 + " JSON END " + "=" * 20 + "\n")
 
-        # 7. Dispatch (Secretul pleacă prin Header în funcția de mai jos)
-        await send_to_java(payload)
+            # 7. Dispatch
+            await send_to_java(payload)
 
     except Exception as e:
         logger.error(f"🚨 Pipeline Crash: {e}", exc_info=True)
