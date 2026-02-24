@@ -1,5 +1,4 @@
 import asyncio
-import json
 import httpx
 from datetime import datetime
 from core.logger import setup_logger
@@ -7,7 +6,6 @@ from core.config import config
 from engine.scraper import WikiScraper
 from engine.processor import AIProcessor
 from engine.ranker import ScoringEngine
-# DailyPayload acum nu mai cere api_secret în definiție conform discuției noastre pe models.py
 from schema.models import DailyPayload, EventDetail, EventCategory, Translations
 
 logger = setup_logger("MainPipeline")
@@ -16,46 +14,44 @@ logger = setup_logger("MainPipeline")
 async def send_to_java(payload: DailyPayload):
     """Trimitere securizată: Secretul este mutat în Header."""
     headers = {
-        "X-Internal-Api-Key": config.INTERNAL_API_SECRET, # Secretul pleacă aici
+        "X-Internal-Api-Key": config.INTERNAL_API_SECRET,
         "Content-Type": "application/json"
     }
-    # Payload-ul JSON va conține acum doar datele, fără cheia secretă
     payload_json = payload.model_dump(mode='json')
 
-    async with httpx.AsyncClient(timeout=20.0) as client:
+    async with httpx.AsyncClient(timeout=25.0) as client:
         try:
             logger.info(f"📤 Ingesting to Java: {config.JAVA_BACKEND_URL}")
             response = await client.post(config.JAVA_BACKEND_URL, json=payload_json, headers=headers)
             if response.status_code in [200, 201]:
-                logger.info("✅ Success! Java Backend a acceptat cheia din Header.")
+                logger.info("✅ Success! Java Backend a primit toate cele 5 evenimente.")
             else:
-                logger.warning(f"⚠️ Backend Status {response.status_code}. Verifică dacă Sergiu citește corect Header-ul.")
+                logger.warning(f"⚠️ Backend Status {response.status_code}")
         except Exception as e:
-            logger.error(f"❌ Backend Offline sau eroare rețea: {e}")
+            logger.error(f"❌ Backend Offline: {e}")
 
 
 async def safe_upload(scraper, url, folder_name):
-    """Upload sigur în Cloudinary."""
     if not url: return None
     try:
         return await asyncio.to_thread(scraper.upload_to_cloudinary, url, folder_name)
-    except Exception as e:
-        logger.warning(f"⚠️ Cloudinary Failed: {e}")
+    except Exception:
         return None
 
 
 async def main():
-    logger.info("🚀 Starting Unified Pipeline (Header Auth Mode)...")
+    logger.info("🚀 Starting Unified Pipeline (Top 5 Unique Events)...")
     scraper, processor, ranker = WikiScraper(), AIProcessor(), ScoringEngine()
 
     try:
-        # 1. Fetch & Rank (Heuristics)
+        # 1. Fetch & Heuristic Rank
         raw_events = await scraper.fetch_today()
         for item in raw_events:
             item['h_score'] = ranker.heuristic_score(item)
+
         candidates = sorted(raw_events, key=lambda x: x['h_score'], reverse=True)[:config.MAX_CANDIDATES_FOR_AI]
 
-        # 2. AI & Views
+        # 2. AI Scoring & Views
         ai_data = await processor.batch_score_and_categorize(candidates)
         ai_results = ai_data.get('results', {})
         view_tasks = [scraper.fetch_page_views(c.get('slug')) for c in candidates]
@@ -68,22 +64,23 @@ async def main():
                 'views': views[idx] if isinstance(views[idx], int) else 0,
                 'category': res.get('category', 'culture_arts'),
                 'score': res.get('score', 50),
-                'titles': res.get('titles', {l: "Event" for l in ["en", "ro", "es", "de", "fr"]})
+                'titles': res.get('titles', {l: "History Event" for l in ["en", "ro", "es", "de", "fr"]})
             })
             item['final_score'] = ranker.calculate_final_score(item['h_score'], item['score'], item['views'])
 
+        # SORTARE FINALĂ ȘI LIMITARE LA 5 EVENIMENTE DIFERITE
         candidates.sort(key=lambda x: x.get('final_score', 0), reverse=True)
-        top_candidates = candidates[:6]  # Luăm primele 6
+        top_5 = candidates[:5]
 
-        # 4. Multilingual Generation (Parallel)
-        narratives_map = await processor.generate_secondary_narratives(top_candidates)
+        # 4. Generare Narațiuni (Toate odată)
+        narratives_map = await processor.generate_secondary_narratives(top_5)
 
         final_events_list = []
-        for idx, item in enumerate(top_candidates):
+        for idx, item in enumerate(top_5):
             slug = item.get('slug', 'history')
             year = item.get('year', 0)
 
-            # Primul primește galerie (3 poze), restul 1 poză
+            # Primul primește galerie, restul 1 poză
             if idx == 0:
                 wiki_imgs = await scraper.fetch_gallery_urls(slug, limit=3)
                 img_tasks = [safe_upload(scraper, url, f"ev_{year}_{i}") for i, url in enumerate(wiki_imgs)]
@@ -92,7 +89,6 @@ async def main():
                 thumb = await safe_upload(scraper, item.get('wiki_thumb'), f"ev_{year}")
                 gallery = [thumb] if thumb else []
 
-            # Construim obiectul EventDetail
             final_events_list.append(EventDetail(
                 category=EventCategory(item['category'].lower()),
                 year=year,
@@ -105,24 +101,23 @@ async def main():
                 gallery=gallery
             ))
 
-            # 5. ASAMBLARE PAYLOAD
-            payload = DailyPayload(
-                date_processed=datetime.now().date(),
-                events=final_events_list,
-                metadata={"processed": len(candidates), "delivered": len(final_events_list)}
-            )
+        # --- AICI ERA GREȘEALA: Codul de mai jos trebuie să fie ÎN AFARA buclei for ---
 
-            # 6. LOGARE CURATĂ (Soluția pentru erori vizuale)
-            # Generăm JSON-ul indentat pentru trimitere (dacă vrei) sau pentru un print curat
-            clean_json_pretty = payload.model_dump_json(indent=4)
+        # 5. ASAMBLARE PAYLOAD (O singură dată, cu toate cele 5)
+        payload = DailyPayload(
+            date_processed=datetime.now().date(),
+            events=final_events_list,
+            metadata={"processed": len(candidates), "count": len(final_events_list)}
+        )
 
-            # Folosim separatorul tău, dar printăm totul într-un singur bloc
-            print("\n" + "=" * 20 + " JSON START (NO SECRET) " + "=" * 20)
-            print(clean_json_pretty)
-            print("=" * 20 + " JSON END " + "=" * 20 + "\n")
+        # 6. LOGARE CURATĂ (Compactă pentru a evita timestamp pe fiecare linie în Railway)
+        compact_json = payload.model_dump_json()
+        print("\n" + "=" * 20 + " JSON START (NO SECRET) " + "=" * 20)
+        print(compact_json)
+        print("=" * 20 + " JSON END " + "=" * 20 + "\n")
 
-            # 7. Dispatch
-            await send_to_java(payload)
+        # 7. TRIMITERE FINALĂ
+        await send_to_java(payload)
 
     except Exception as e:
         logger.error(f"🚨 Pipeline Crash: {e}", exc_info=True)
