@@ -1,6 +1,4 @@
 import asyncio
-import json
-import httpx
 from datetime import datetime
 from core.logger import setup_logger
 from core.config import config
@@ -13,132 +11,114 @@ logger = setup_logger("MainPipeline")
 
 
 async def send_to_java(payload: DailyPayload):
-    """Trimitere securizată către backend."""
+    """Trimitere securizată către backend Java."""
     headers = {
         "X-Internal-Api-Key": config.INTERNAL_API_SECRET,
         "Content-Type": "application/json"
     }
     payload_json = payload.model_dump(mode='json')
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=20.0) as client:
         try:
             logger.info(f"📤 Ingesting to Java: {config.JAVA_BACKEND_URL}")
             response = await client.post(config.JAVA_BACKEND_URL, json=payload_json, headers=headers)
             if response.status_code in [200, 201]:
-                logger.info("✅ Success! Java Backend a primit datele.")
+                logger.info("✅ Success! Datele au fost salvate în DB.")
             else:
-                logger.warning(f"⚠️ Backend Status {response.status_code}")
+                logger.warning(f"⚠️ Backend Response Status: {response.status_code}")
         except Exception as e:
-            logger.error(f"❌ Backend Offline: {e}")
+            logger.error(f"❌ Connection failed: {e}")
 
 
 async def safe_upload(scraper, url, folder_name):
+    """Upload sigur în Cloudinary."""
+    if not url: return None
     try:
         return await asyncio.to_thread(scraper.upload_to_cloudinary, url, folder_name)
-    except Exception as e:
-        logger.warning(f"⚠️ Cloudinary Failed: {e}")
+    except Exception:
         return None
 
 
 async def main():
-    logger.info("🚀 Starting Elite Daily Pipeline...")
-    default_langs = {l: "Data pending..." for l in ["en", "ro", "es", "de", "fr"]}
-
-    scraper = WikiScraper()
-    processor = AIProcessor()
-    ranker = ScoringEngine()
+    logger.info("🚀 Starting Unified Pipeline...")
+    scraper, processor, ranker = WikiScraper(), AIProcessor(), ScoringEngine()
 
     try:
-        # 1. Fetch & Heuristic Ranking
+        # 1. Colectare și Score Euristic
         raw_events = await scraper.fetch_today()
         for item in raw_events:
             item['h_score'] = ranker.heuristic_score(item)
+
+        # Selectăm top pentru AI
         candidates = sorted(raw_events, key=lambda x: x['h_score'], reverse=True)[:config.MAX_CANDIDATES_FOR_AI]
 
-        # 2. AI Scoring
+        # 2. AI Categorization & Views (Parallel)
         ai_data = await processor.batch_score_and_categorize(candidates)
         ai_results = ai_data.get('results', {})
-
-        # 3. Views & Data Merging
         view_tasks = [scraper.fetch_page_views(c.get('slug')) for c in candidates]
         views = await asyncio.gather(*view_tasks)
 
+        # 3. Merge & Final Sorting
         for idx, item in enumerate(candidates):
             res = ai_results.get(f"ID_{idx}", {})
             item.update({
-                'views': views[idx] if isinstance(views[idx], int) else 0,
-                'category': res.get('category', 'culture_arts'),
-                'ai_impact': res.get('score', 50),
-                'titles': res.get('titles', default_langs),
-                'final_score': ranker.calculate_final_score(item['h_score'], res.get('score', 50),
-                                                            views[idx] if isinstance(views[idx], int) else 0)
+                'v_count': views[idx] if isinstance(views[idx], int) else 0,
+                'cat': res.get('category', 'culture_arts'),
+                'a_score': res.get('score', 50),
+                'titles': res.get('titles', {l: "History" for l in ["en", "ro", "es", "de", "fr"]})
             })
+            item['f_score'] = ranker.calculate_final_score(item['h_score'], item['a_score'], item['v_count'])
 
-        candidates.sort(key=lambda x: x.get('final_score', 0), reverse=True)
+        # Luăm top 6 final
+        candidates.sort(key=lambda x: x.get('f_score', 0), reverse=True)
+        top_6 = candidates[:6]
 
-        # 4. Main Event (Discovery 2011 etc)
-        top_data = candidates[0]
-        main_content = await processor.generate_multilingual_main_event(top_data)
+        # 4. Generare Narațiuni în Batch (Parallel)
+        # processor.generate_secondary_narratives scoate deja dict-ul de limbi pentru fiecare
+        narratives_map = await processor.generate_secondary_narratives(top_6)
 
-        wiki_imgs = await scraper.fetch_gallery_urls(top_data.get('slug', 'history'), limit=3)
-        img_tasks = [safe_upload(scraper, url, f"main_{top_data['year']}_{i}") for i, url in enumerate(wiki_imgs)]
-        main_gallery = [img for img in await asyncio.gather(*img_tasks) if img]
+        final_events_list = []
+        for idx, item in enumerate(top_6):
+            slug = item.get('slug', 'history')
+            year = item.get('year', 0)
 
-        main_event_obj = EventDetail(
-            category=EventCategory(top_data['category'].lower()),
-            year=top_data['year'],
-            event_date=datetime.now().date(),
-            source_url=f"https://en.wikipedia.org/wiki/{top_data.get('slug')}",
-            title_translations=Translations(**main_content.get('titles')),
-            narrative_translations=Translations(**main_content.get('narratives')),
-            impact_score=float(top_data['final_score']),
-            page_views_30d=top_data.get('views', 0),
-            gallery=main_gallery
-        )
+            # Gestionare Imagini: Primul primește galerie (3 poze), restul 1 poză
+            if idx == 0:
+                wiki_imgs = await scraper.fetch_gallery_urls(slug, limit=3)
+                img_tasks = [safe_upload(scraper, url, f"ev_{year}_{i}") for i, url in enumerate(wiki_imgs)]
+                image_urls = [img for img in await asyncio.gather(*img_tasks) if img]
+            else:
+                thumb = await safe_upload(scraper, item.get('wiki_thumb'), f"ev_{year}")
+                image_urls = [thumb] if thumb else []
 
-        # 5. Secondary Events
-        secondary_pool = candidates[1:6]
-        sec_narratives_map = await processor.generate_secondary_narratives(secondary_pool)
-        secondary_objs = []
-
-        for idx, item in enumerate(secondary_pool):
-            key = f"EVENT_{idx}"
-            narratives = sec_narratives_map.get(key, default_langs)
-            thumb_url = await safe_upload(scraper, item.get('wiki_thumb'), f"sec_{item['year']}_{idx}")
-
-            secondary_objs.append(EventDetail(
-                category=EventCategory(item.get('category', 'culture_arts').lower()),
-                year=item['year'],
+            # Creare Obiect EventDetail curat
+            final_events_list.append(EventDetail(
+                category=EventCategory(item['cat'].lower()),
+                year=year,
                 event_date=datetime.now().date(),
-                source_url=f"https://en.wikipedia.org/wiki/{item.get('slug')}",
-                title_translations=Translations(**item.get('titles', default_langs)),
-                narrative_translations=Translations(**narratives),
-                impact_score=float(item.get('final_score', 0)),
-                page_views_30d=item.get('views', 0),
-                gallery=[thumb_url] if thumb_url else []
+                source_url=f"https://en.wikipedia.org/wiki/{slug}",
+                title_translations=Translations(**item['titles']),
+                narrative_translations=Translations(**narratives_map.get(f"EVENT_{idx}", {})),
+                impact_score=float(item['f_score']),
+                page_views_30d=item['v_count'],
+                gallery=image_urls
             ))
 
-        # 6. ASSEMBLE FINAL PAYLOAD
+        # 5. ASAMBLARE PAYLOAD UNIC
         payload = DailyPayload(
             date_processed=datetime.now().date(),
             api_secret=config.INTERNAL_API_SECRET,
-            main_event=main_event_obj,
-            secondary_events=secondary_objs,
-            metadata={"processed_candidates": len(candidates)}
+            events=final_events_list,
+            metadata={"processed": len(candidates), "delivered": len(final_events_list)}
         )
 
-        # 7. LOGARE CURATĂ (Soluția pentru diamante)
-        json_output = payload.model_dump_json(indent=4)
+        # 6. LOGARE FINALĂ ȘI TRIMITERE
+        clean_json = payload.model_dump_json(indent=4)
 
-        header = "\n" + "💎" * 30 + "\n💎 FINAL GENERATED PAYLOAD 💎\n" + "💎" * 30
-        logger.info(header)
-        logger.info(f"\n{json_output}\n")
-        logger.info("💎" * 30 + "\n")
+        # Folosim un singur print lung pentru a evita intercalarea logurilor
+        logger.info(f"\n{'=' * 20} JSON START {'=' * 20}\n{clean_json}\n{'=' * 20} JSON END {'=' * 20}\n")
 
-        # Mică pauză să respire consola înainte de ingestie
-        await asyncio.sleep(1)
-
-        # 8. Dispatch
+        await asyncio.sleep(1)  # Pauză scurtă pentru buffer-ul de consolă
         await send_to_java(payload)
 
     except Exception as e:
