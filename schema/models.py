@@ -33,6 +33,5 @@ class EventDetail(BaseModel):
 
 class DailyPayload(BaseModel):
     date_processed: date
-    api_secret: str
     events: List[EventDetail]  # <--- Singura sursă de adevăr
     metadata: dict = Field(default_factory=dict)
