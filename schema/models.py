@@ -1,7 +1,15 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
+from pydantic.alias_generators import to_camel
 from typing import List, Optional, Dict
 from datetime import date
 from enum import Enum
+
+# 1. Clasa de bază care face magia: folosești snake_case în Python, dar exportă camelCase
+class CamelModel(BaseModel):
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True # Îți permite să folosești snake_case la inițializare
+    )
 
 class EventCategory(str, Enum):
     WAR_CONFLICT = "war_conflict"
@@ -13,14 +21,14 @@ class EventCategory(str, Enum):
     EXPLORATION = "exploration"
     RELIGION_PHIL = "religion_phil"
 
-class Translations(BaseModel):
+class Translations(CamelModel):
     en: str
     ro: str
     es: str
     de: str
     fr: str
 
-class EventDetail(BaseModel):
+class EventDetail(CamelModel):
     category: EventCategory
     year: int
     event_date: date
@@ -31,7 +39,7 @@ class EventDetail(BaseModel):
     page_views_30d: int = 0
     gallery: List[str] = []
 
-class DailyPayload(BaseModel):
+class DailyPayload(CamelModel):
     date_processed: date
-    events: List[EventDetail]  # <--- Singura sursă de adevăr
+    events: List[EventDetail]
     metadata: dict = Field(default_factory=dict)

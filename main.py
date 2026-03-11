@@ -12,23 +12,32 @@ logger = setup_logger("MainPipeline")
 
 
 async def send_to_java(payload: DailyPayload):
-    """Trimitere securizată: Secretul este mutat în Header."""
+    # Nu scrie URL-ul aici cu mâna!
+    target_url = config.JAVA_BACKEND_URL
+
     headers = {
         "X-Internal-Api-Key": config.INTERNAL_API_SECRET,
         "Content-Type": "application/json"
     }
-    payload_json = payload.model_dump(mode='json')
 
-    async with httpx.AsyncClient(timeout=25.0) as client:
+    # Exportăm JSON-ul curat pentru Sergiu
+    payload_json = payload.model_dump(
+        mode='json',
+        by_alias=True,
+        exclude={'metadata': True, 'events': {'__all__': {'year'}}}
+    )
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
         try:
-            logger.info(f"📤 Ingesting to Java: {config.JAVA_BACKEND_URL}")
-            response = await client.post(config.JAVA_BACKEND_URL, json=payload_json, headers=headers)
+            logger.info(f"🚀 Ingesting to Java via Private Network: {target_url}")
+            response = await client.post(target_url, json=payload_json, headers=headers)
+
             if response.status_code in [200, 201]:
-                logger.info("✅ Success! Java Backend a primit toate cele 5 evenimente.")
+                logger.info("✅ Success! Datele au ajuns la Sergiu.")
             else:
-                logger.warning(f"⚠️ Backend Status {response.status_code}")
+                logger.error(f"❌ Java a refuzat datele: {response.status_code} - {response.text}")
         except Exception as e:
-            logger.error(f"❌ Backend Offline: {e}")
+            logger.error(f"🚨 Eroare de rețea privată Railway: {e}")
 
 
 async def safe_upload(scraper, url, folder_name):
