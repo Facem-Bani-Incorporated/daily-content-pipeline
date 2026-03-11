@@ -12,32 +12,66 @@ logger = setup_logger("MainPipeline")
 
 
 async def send_to_java(payload: DailyPayload):
-    # Nu scrie URL-ul aici cu mâna!
     target_url = config.JAVA_BACKEND_URL
+    secret = config.INTERNAL_API_SECRET
 
+    # 1. Pregătire Header-e
     headers = {
-        "X-Internal-Api-Key": config.INTERNAL_API_SECRET,
-        "Content-Type": "application/json"
+        "X-Internal-Api-Key": secret,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "DailyHistory-Python-Pipeline/1.0"
     }
 
-    # Exportăm JSON-ul curat pentru Sergiu
     payload_json = payload.model_dump(
         mode='json',
         by_alias=True,
         exclude={'metadata': True, 'events': {'__all__': {'year'}}}
     )
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            logger.info(f"🚀 Ingesting to Java via Private Network: {target_url}")
-            response = await client.post(target_url, json=payload_json, headers=headers)
+    # 2. Configurare Retry (3 încercări)
+    # Folositor dacă Sergiu face deploy în același timp
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        for attempt in range(1, 4):
+            try:
+                logger.info(f"📤 [Attempt {attempt}/3] Ingesting to: {target_url}")
 
-            if response.status_code in [200, 201]:
-                logger.info("✅ Success! Datele au ajuns la Sergiu.")
-            else:
-                logger.error(f"❌ Java a refuzat datele: {response.status_code} - {response.text}")
-        except Exception as e:
-            logger.error(f"🚨 Eroare de rețea privată Railway: {e}")
+                response = await client.post(target_url, json=payload_json, headers=headers)
+
+                # Verificăm statusul
+                if response.status_code in [200, 201]:
+                    logger.info(f"✅ SUCCESS! Java accepted data (ID: {response.text})")
+                    return  # Ieșim din funcție dacă e bine
+
+                # ERROR HANDLING SPECIFIC
+                if response.status_code == 401:
+                    logger.error(
+                        "🚫 ERROR 401: Secret mismatch sau Spring Security blochează header-ul X-Internal-Api-Key.")
+                    logger.error(
+                        f"DEBUG: Verifică dacă INTERNAL_API_SECRET din Railway Python este IDENTIC cu cel din Java.")
+                    break  # Nu mai încercăm, e problemă de credențiale
+
+                if response.status_code == 404:
+                    logger.error(f"❓ ERROR 404: Endpoint-ul nu există. Ești sigur că URL-ul e {target_url}?")
+                    break
+
+                if response.status_code == 400:
+                    logger.error(f"🧱 ERROR 400: Payload invalid. Java zice: {response.text}")
+                    break
+
+                logger.warning(f"⚠️ Status neașteptat: {response.status_code}. Reîncercăm...")
+
+            except httpx.ConnectError:
+                logger.error(f"🔌 [Attempt {attempt}] Java Offline sau URL Greșit (.railway.internal nu răspunde).")
+            except httpx.TimeoutException:
+                logger.error(f"⏳ [Attempt {attempt}] Java se mișcă prea greu (Timeout).")
+            except Exception as e:
+                logger.error(f"🚨 Eroare neprevăzută: {type(e).__name__}: {e}")
+
+            if attempt < 3:
+                await asyncio.sleep(5)  # Așteptăm 5 secunde înainte de retry
+
+        logger.critical("💀 Pipeline failed after all attempts.")
 
 
 async def safe_upload(scraper, url, folder_name):
