@@ -19,11 +19,10 @@ async def send_to_java(payload: DailyPayload):
     target_url = config.JAVA_BACKEND_URL
     secret = config.INTERNAL_API_SECRET
 
-    # 1. Reconstruim lista de evenimente exact cum apar în EventDTO.java
     events_final = []
     for ev in payload.events:
         events_final.append({
-            "category": ev.category.value,  # "war_conflict" etc.
+            "category": ev.category.value,
             "titleTranslations": {
                 "en": ev.title_translations.en,
                 "ro": ev.title_translations.ro,
@@ -38,27 +37,26 @@ async def send_to_java(payload: DailyPayload):
                 "de": ev.narrative_translations.de,
                 "fr": ev.narrative_translations.fr
             },
-            "eventDate": ev.event_date.isoformat(),  # "2026-03-11"
+            "eventDate": ev.event_date.isoformat(),
             "impactScore": float(ev.impact_score),
             "sourceUrl": str(ev.source_url),
             "pageViews30d": int(ev.page_views_30d),
             "gallery": ev.gallery if ev.gallery else []
         })
 
-    # 2. DailyContentDTO.java vrea dateProcessed și events
     payload_to_serialize = {
         "dateProcessed": payload.date_processed.isoformat(),
         "events": events_final
     }
 
     import json
-    # Important: separators=(',', ':') elimină spațiile pentru ca HMAC-ul să fie identic cu ce vede Java
     body_json = json.dumps(payload_to_serialize, separators=(',', ':'))
+    body_bytes = body_json.encode('utf-8')  # ✅ FIX 1: encode explicit la bytes
 
-    # 3. Logica HMAC (care deja funcționează)
     timestamp = str(int(time.time()))
     auth_payload = f"{timestamp}.{body_json}"
 
+    # ✅ FIX 2: hmac.new → hmac.new e corect, dar verifică importul
     signature = hmac.new(
         secret.encode('utf-8'),
         auth_payload.encode('utf-8'),
@@ -73,18 +71,25 @@ async def send_to_java(payload: DailyPayload):
         "Content-Type": "application/json"
     }
 
+    # ✅ FIX 3: Log body înainte să trimiți ca să verifici
+    logger.info(f"📦 Body trimis: {body_json[:200]}...")
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
-            logger.info(f"📤 Final Attempt - Sending to Java: {target_url}")
-            response = await client.post(target_url, content=body_json, headers=headers)
+            logger.info(f"📤 Sending to Java: {target_url}")
+            response = await client.post(
+                target_url,
+                content=body_bytes,  # ✅ bytes, nu string
+                headers=headers
+            )
 
             if response.status_code in [200, 201]:
-                logger.info("✅ SUCCESS! Legătura Python -> Java este oficial funcțională.")
+                logger.info(f"✅ SUCCESS! ID returnat: {response.text}")
             else:
-                # Dacă încă dă 400, înseamnă că un câmp are nume greșit (ex: eventDate vs event_date)
                 logger.error(f"❌ Status {response.status_code}: {response.text}")
+                logger.error(f"❌ Body trimis era: {body_json}")
         except Exception as e:
-            logger.error(f"🚨 Eroare: {e}")
+            logger.error(f"🚨 Eroare conexiune: {e}")
 
 
 async def safe_upload(scraper, url, folder_name):
