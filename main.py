@@ -19,31 +19,31 @@ async def send_to_java(payload: DailyPayload):
     target_url = config.JAVA_BACKEND_URL
     secret = config.INTERNAL_API_SECRET
 
-    # --- FIX PENTRU EROARE 400 ---
-    # Convertim totul manual pentru a fi siguri de format
-    events_fixed = []
+    # --- CONSTRUCȚIE PAYLOAD BAZATĂ EXACT PE RECORD-URILE JAVA ---
+    events_to_send = []
     for ev in payload.events:
-        events_fixed.append({
-            "category": ev.category.value.upper(),  # Java Enums sunt de obicei UPPERCASE
-            "eventDate": ev.event_date.isoformat(),  # "2026-03-11"
-            "sourceUrl": ev.source_url,
+        events_to_send.append({
+            "category": ev.category.value,  # "war_conflict" (mic, cum vrea @JsonProperty)
             "titleTranslations": ev.title_translations.model_dump(),
             "narrativeTranslations": ev.narrative_translations.model_dump(),
+            "eventDate": ev.event_date.isoformat(),  # "2026-03-11"
             "impactScore": float(ev.impact_score),
+            "sourceUrl": ev.source_url,
             "pageViews30d": int(ev.page_views_30d),
             "gallery": ev.gallery
+            # NU PUNEM "year" - nu exista in EventDTO.java!
         })
 
     payload_dict = {
         "dateProcessed": payload.date_processed.isoformat(),
-        "events": events_fixed
+        "events": events_to_send
     }
 
-    # Generăm JSON-ul compact
+    # JSON compact pentru semnatura HMAC
     import json
     body_json = json.dumps(payload_dict, separators=(',', ':'))
 
-    # --- RESTUL LOGICII HMAC (Neschimbată, căci a mers!) ---
+    # --- LOGICA HMAC (Asta e deja testata si functionala) ---
     timestamp = str(int(time.time()))
     auth_payload = f"{timestamp}.{body_json}"
     signature = hmac.new(
@@ -61,14 +61,14 @@ async def send_to_java(payload: DailyPayload):
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
-            logger.info(f"📤 Ingesting Fixed Payload to: {target_url}")
+            logger.info(f"📤 Sending to Java (Cleaned DTO): {target_url}")
             response = await client.post(target_url, content=body_json, headers=headers)
 
             if response.status_code in [200, 201]:
-                logger.info("✅ SUCCESS! Datele sunt acum în baza de date Java.")
+                logger.info("✅ SUCCESS! Datele au fost mapate corect pe Record-urile Java.")
             else:
-                # Dacă dă tot 400, aici vedem exact ce nu-i convine lui Jackson
-                logger.error(f"❌ Bad Request (400). Detalii: {response.text}")
+                # Daca inca da 400, aici va scrie mesajul de eroare de la Jackson/Spring
+                logger.error(f"❌ Status {response.status_code}: {response.text}")
         except Exception as e:
             logger.error(f"🚨 Eroare: {e}")
 
