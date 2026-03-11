@@ -19,51 +19,58 @@ async def send_to_java(payload: DailyPayload):
     target_url = config.JAVA_BACKEND_URL
     secret = config.INTERNAL_API_SECRET
 
-    # 1. GENERARE BODY JSON (Trebuie să fie identic cu cel trimis în request)
-    # Folosim exact setările de dump pe care le-am stabilit
-    payload_dict = payload.model_dump(
-        mode='json',
-        by_alias=True,
-        exclude={'metadata': True, 'events': {'__all__': {'year'}}}
-    )
-    # Generăm string-ul JSON compact (fără spații inutile, așa cum face de obicei un client HTTP)
+    # --- FIX PENTRU EROARE 400 ---
+    # Convertim totul manual pentru a fi siguri de format
+    events_fixed = []
+    for ev in payload.events:
+        events_fixed.append({
+            "category": ev.category.value.upper(),  # Java Enums sunt de obicei UPPERCASE
+            "eventDate": ev.event_date.isoformat(),  # "2026-03-11"
+            "sourceUrl": ev.source_url,
+            "titleTranslations": ev.title_translations.model_dump(),
+            "narrativeTranslations": ev.narrative_translations.model_dump(),
+            "impactScore": float(ev.impact_score),
+            "pageViews30d": int(ev.page_views_30d),
+            "gallery": ev.gallery
+        })
+
+    payload_dict = {
+        "dateProcessed": payload.date_processed.isoformat(),
+        "events": events_fixed
+    }
+
+    # Generăm JSON-ul compact
     import json
     body_json = json.dumps(payload_dict, separators=(',', ':'))
 
-    # 2. GENERARE TIMESTAMP ȘI PAYLOAD SEMNĂTURĂ
+    # --- RESTUL LOGICII HMAC (Neschimbată, căci a mers!) ---
     timestamp = str(int(time.time()))
-    # Formatul lui Sergiu: timestampHeader + "." + body
     auth_payload = f"{timestamp}.{body_json}"
-
-    # 3. CALCULARE HMAC-SHA256 ÎN FORMAT BASE64
     signature = hmac.new(
         secret.encode('utf-8'),
         auth_payload.encode('utf-8'),
         hashlib.sha256
     ).digest()
-
     signature_base64 = base64.b64encode(signature).decode('utf-8')
 
-    # 4. CONFIGURARE HEADERE EXACT CA ÎN JAVA
     headers = {
         "X-Timestamp": timestamp,
         "X-Signature": signature_base64,
-        "Content-Type": "application/json",
-        "Accept": "application/json"
+        "Content-Type": "application/json"
     }
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
-            logger.info(f"🔐 HMAC Base64 Auth to: {target_url}")
-            # Trimitem direct body_json ca să fim siguri că semnătura se potrivește cu ce pleacă pe fir
+            logger.info(f"📤 Ingesting Fixed Payload to: {target_url}")
             response = await client.post(target_url, content=body_json, headers=headers)
 
             if response.status_code in [200, 201]:
-                logger.info("✅ SUCCESS! Java a validat semnătura și a salvat datele.")
+                logger.info("✅ SUCCESS! Datele sunt acum în baza de date Java.")
             else:
-                logger.error(f"❌ Refuzat ({response.status_code}). Java zice: {response.text}")
+                # Dacă dă tot 400, aici vedem exact ce nu-i convine lui Jackson
+                logger.error(f"❌ Bad Request (400). Detalii: {response.text}")
         except Exception as e:
-            logger.error(f"🚨 Eroare tehnică: {e}")
+            logger.error(f"🚨 Eroare: {e}")
 
 
 async def safe_upload(scraper, url, folder_name):
