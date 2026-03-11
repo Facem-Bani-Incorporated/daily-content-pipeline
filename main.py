@@ -16,13 +16,17 @@ logger = setup_logger("MainPipeline")
 
 async def send_to_java(payload: DailyPayload):
     target_url = config.JAVA_BACKEND_URL
-    secret = config.INTERNAL_API_SECRET  # Acesta este 'pipelineSecret' din Java
+    secret = config.INTERNAL_API_SECRET
 
-    # 1. GENERARE SEMNĂTURĂ HMAC (Ce așteaptă Sergiu)
+    # 1. GENERARE TIMESTAMP ȘI DATE REQUEST
     timestamp = str(int(time.time()))
-    # Creăm mesajul: timestamp + metoda + endpoint
-    # Atenție: trebuie să coincidă exact cu ce a scris Sergiu în PipelineHmacAuthFilter
-    message = f"{timestamp}POST/api/daily-content"
+    method = "POST"
+    # Folosim path-ul exact așa cum e în requestMatchers din Java
+    path = "/api/daily-content"
+
+    # 2. CONSTRUCȚIE MESAJ (Standard HMAC Auth)
+    # Dacă Sergiu a urmat un tutorial standard, mesajul arată așa:
+    message = f"{timestamp}:{method}:{path}"
 
     signature = hmac.new(
         secret.encode('utf-8'),
@@ -30,7 +34,7 @@ async def send_to_java(payload: DailyPayload):
         hashlib.sha256
     ).hexdigest()
 
-    # 2. CONFIGURARE HEADERE (Trebuie să trimitem timestamp și semnătura)
+    # 3. HEADERELE (Am pus cele mai comune nume folosite în Java)
     headers = {
         "X-Pipeline-Timestamp": timestamp,
         "X-Pipeline-Signature": signature,
@@ -46,14 +50,19 @@ async def send_to_java(payload: DailyPayload):
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
-            logger.info(f"🔐 Sending HMAC Signed Request to: {target_url}")
+            logger.info(f"🔐 Attempting HMAC Auth to: {target_url}")
+            logger.info(f"DEBUG: Msg used for sig: {message}")
+
             response = await client.post(target_url, json=payload_json, headers=headers)
 
             if response.status_code in [200, 201]:
-                logger.info("✅ SUCCESS! HMAC Signature validată de Java.")
+                logger.info("✅ SUCCESS! Datele au fost acceptate.")
             else:
-                logger.error(f"❌ Refuzat ({response.status_code}). Java zice: {response.text}")
-                # Dacă dă tot 401, înseamnă că 'message' de mai sus e construit diferit în Java
+                logger.error(f"❌ Refuzat ({response.status_code}).")
+                # Dacă e tot 401, cere-i lui Sergiu fisierul PipelineHmacAuthFilter.java
+                if response.status_code == 401:
+                    logger.warning(
+                        "Sfat: Cere-i lui Sergiu fisierul 'PipelineHmacAuthFilter.java' ca sa vedem formatul exact al semnaturii.")
         except Exception as e:
             logger.error(f"🚨 Eroare: {e}")
 
