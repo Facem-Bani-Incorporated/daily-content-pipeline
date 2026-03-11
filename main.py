@@ -19,38 +19,52 @@ async def send_to_java(payload: DailyPayload):
     target_url = config.JAVA_BACKEND_URL
     secret = config.INTERNAL_API_SECRET
 
-    # --- CONSTRUCȚIE PAYLOAD BAZATĂ EXACT PE RECORD-URILE JAVA ---
-    events_to_send = []
+    # 1. Reconstruim lista de evenimente exact cum apar în EventDTO.java
+    events_final = []
     for ev in payload.events:
-        events_to_send.append({
-            "category": ev.category.value,  # "war_conflict" (mic, cum vrea @JsonProperty)
-            "titleTranslations": ev.title_translations.model_dump(),
-            "narrativeTranslations": ev.narrative_translations.model_dump(),
+        events_final.append({
+            "category": ev.category.value,  # "war_conflict" etc.
+            "titleTranslations": {
+                "en": ev.title_translations.en,
+                "ro": ev.title_translations.ro,
+                "es": ev.title_translations.es,
+                "de": ev.title_translations.de,
+                "fr": ev.title_translations.fr
+            },
+            "narrativeTranslations": {
+                "en": ev.narrative_translations.en,
+                "ro": ev.narrative_translations.ro,
+                "es": ev.narrative_translations.es,
+                "de": ev.narrative_translations.de,
+                "fr": ev.narrative_translations.fr
+            },
             "eventDate": ev.event_date.isoformat(),  # "2026-03-11"
             "impactScore": float(ev.impact_score),
-            "sourceUrl": ev.source_url,
+            "sourceUrl": str(ev.source_url),
             "pageViews30d": int(ev.page_views_30d),
-            "gallery": ev.gallery
-            # NU PUNEM "year" - nu exista in EventDTO.java!
+            "gallery": ev.gallery if ev.gallery else []
         })
 
-    payload_dict = {
+    # 2. DailyContentDTO.java vrea dateProcessed și events
+    payload_to_serialize = {
         "dateProcessed": payload.date_processed.isoformat(),
-        "events": events_to_send
+        "events": events_final
     }
 
-    # JSON compact pentru semnatura HMAC
     import json
-    body_json = json.dumps(payload_dict, separators=(',', ':'))
+    # Important: separators=(',', ':') elimină spațiile pentru ca HMAC-ul să fie identic cu ce vede Java
+    body_json = json.dumps(payload_to_serialize, separators=(',', ':'))
 
-    # --- LOGICA HMAC (Asta e deja testata si functionala) ---
+    # 3. Logica HMAC (care deja funcționează)
     timestamp = str(int(time.time()))
     auth_payload = f"{timestamp}.{body_json}"
+
     signature = hmac.new(
         secret.encode('utf-8'),
         auth_payload.encode('utf-8'),
         hashlib.sha256
     ).digest()
+
     signature_base64 = base64.b64encode(signature).decode('utf-8')
 
     headers = {
@@ -61,13 +75,13 @@ async def send_to_java(payload: DailyPayload):
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
-            logger.info(f"📤 Sending to Java (Cleaned DTO): {target_url}")
+            logger.info(f"📤 Final Attempt - Sending to Java: {target_url}")
             response = await client.post(target_url, content=body_json, headers=headers)
 
             if response.status_code in [200, 201]:
-                logger.info("✅ SUCCESS! Datele au fost mapate corect pe Record-urile Java.")
+                logger.info("✅ SUCCESS! Legătura Python -> Java este oficial funcțională.")
             else:
-                # Daca inca da 400, aici va scrie mesajul de eroare de la Jackson/Spring
+                # Dacă încă dă 400, înseamnă că un câmp are nume greșit (ex: eventDate vs event_date)
                 logger.error(f"❌ Status {response.status_code}: {response.text}")
         except Exception as e:
             logger.error(f"🚨 Eroare: {e}")
