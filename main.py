@@ -10,6 +10,7 @@ from schema.models import DailyPayload, EventDetail, EventCategory, Translations
 import hmac
 import hashlib
 import time
+import base64
 
 logger = setup_logger("MainPipeline")
 
@@ -18,53 +19,51 @@ async def send_to_java(payload: DailyPayload):
     target_url = config.JAVA_BACKEND_URL
     secret = config.INTERNAL_API_SECRET
 
-    # 1. GENERARE TIMESTAMP ȘI DATE REQUEST
-    timestamp = str(int(time.time()))
-    method = "POST"
-    # Folosim path-ul exact așa cum e în requestMatchers din Java
-    path = "/api/daily-content"
-
-    # 2. CONSTRUCȚIE MESAJ (Standard HMAC Auth)
-    # Dacă Sergiu a urmat un tutorial standard, mesajul arată așa:
-    message = f"{timestamp}:{method}:{path}"
-
-    signature = hmac.new(
-        secret.encode('utf-8'),
-        message.encode('utf-8'),
-        hashlib.sha256
-    ).hexdigest()
-
-    # 3. HEADERELE (Am pus cele mai comune nume folosite în Java)
-    headers = {
-        "X-Pipeline-Timestamp": timestamp,
-        "X-Pipeline-Signature": signature,
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-    }
-
-    payload_json = payload.model_dump(
+    # 1. GENERARE BODY JSON (Trebuie să fie identic cu cel trimis în request)
+    # Folosim exact setările de dump pe care le-am stabilit
+    payload_dict = payload.model_dump(
         mode='json',
         by_alias=True,
         exclude={'metadata': True, 'events': {'__all__': {'year'}}}
     )
+    # Generăm string-ul JSON compact (fără spații inutile, așa cum face de obicei un client HTTP)
+    import json
+    body_json = json.dumps(payload_dict, separators=(',', ':'))
+
+    # 2. GENERARE TIMESTAMP ȘI PAYLOAD SEMNĂTURĂ
+    timestamp = str(int(time.time()))
+    # Formatul lui Sergiu: timestampHeader + "." + body
+    auth_payload = f"{timestamp}.{body_json}"
+
+    # 3. CALCULARE HMAC-SHA256 ÎN FORMAT BASE64
+    signature = hmac.new(
+        secret.encode('utf-8'),
+        auth_payload.encode('utf-8'),
+        hashlib.sha256
+    ).digest()
+
+    signature_base64 = base64.b64encode(signature).decode('utf-8')
+
+    # 4. CONFIGURARE HEADERE EXACT CA ÎN JAVA
+    headers = {
+        "X-Timestamp": timestamp,
+        "X-Signature": signature_base64,
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
-            logger.info(f"🔐 Attempting HMAC Auth to: {target_url}")
-            logger.info(f"DEBUG: Msg used for sig: {message}")
-
-            response = await client.post(target_url, json=payload_json, headers=headers)
+            logger.info(f"🔐 HMAC Base64 Auth to: {target_url}")
+            # Trimitem direct body_json ca să fim siguri că semnătura se potrivește cu ce pleacă pe fir
+            response = await client.post(target_url, content=body_json, headers=headers)
 
             if response.status_code in [200, 201]:
-                logger.info("✅ SUCCESS! Datele au fost acceptate.")
+                logger.info("✅ SUCCESS! Java a validat semnătura și a salvat datele.")
             else:
-                logger.error(f"❌ Refuzat ({response.status_code}).")
-                # Dacă e tot 401, cere-i lui Sergiu fisierul PipelineHmacAuthFilter.java
-                if response.status_code == 401:
-                    logger.warning(
-                        "Sfat: Cere-i lui Sergiu fisierul 'PipelineHmacAuthFilter.java' ca sa vedem formatul exact al semnaturii.")
+                logger.error(f"❌ Refuzat ({response.status_code}). Java zice: {response.text}")
         except Exception as e:
-            logger.error(f"🚨 Eroare: {e}")
+            logger.error(f"🚨 Eroare tehnică: {e}")
 
 
 async def safe_upload(scraper, url, folder_name):
