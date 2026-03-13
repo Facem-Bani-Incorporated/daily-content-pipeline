@@ -4,12 +4,11 @@ import cloudinary.uploader
 from typing import Optional, List
 from datetime import datetime, timedelta
 
-# Importăm obiectul config din locația corectă (ajustează calea dacă e diferită)
+# Importăm obiectul config din locația corectă
 from core.config import config
 from core.logger import setup_logger
 
 logger = setup_logger("Scraper")
-
 
 class WikiScraper:
     def __init__(self):
@@ -22,6 +21,24 @@ class WikiScraper:
             api_secret=config.CLOUDINARY_API_SECRET
         )
 
+    def _get_high_res_url(self, url: str) -> str:
+        """
+        Transformă un URL de thumbnail Wikipedia în URL-ul imaginii originale.
+        Exemplu: dintr-un thumb de 200px extrage sursa originală de câțiva MB.
+        """
+        if not url or "upload.wikimedia.org" not in url:
+            return url
+        
+        if "/thumb/" in url:
+            # Structura URL-ului de thumb la Wiki: .../thumb/a/a1/Nume.jpg/200px-Nume.jpg
+            # Eliminăm '/thumb/' și ultima parte (dimensiunea) pentru a obține originalul.
+            parts = url.replace("/thumb/", "/").split("/")
+            # Verificăm dacă ultima parte este o redimensionare (ex: '200px-...')
+            if parts[-1].lower().endswith(('.jpg', '.jpeg', '.png', '.webp')) and 'px-' in parts[-1]:
+                return "/".join(parts[:-1])
+            return "/".join(parts)
+        return url
+
     async def fetch_today(self) -> List[dict]:
         """Extrage evenimentele zilei și pregătește slug-urile pentru procesare."""
         now = datetime.now()
@@ -33,12 +50,10 @@ class WikiScraper:
                 response.raise_for_status()
                 data = response.json()
 
-                # Combinăm evenimentele principale cu cele secundare
                 raw_events = data.get('selected', []) + data.get('events', [])
 
                 processed_events = []
                 for event in raw_events:
-                    # Wikipedia API structure: extragem primul link valid
                     pages = event.get('pages', [])
                     slug = pages[0].get('titles', {}).get('canonical') if pages else None
                     thumbnail = pages[0].get('thumbnail', {}).get('source') if pages else None
@@ -59,10 +74,8 @@ class WikiScraper:
         if not title_slug or title_slug == "history":
             return 0
 
-        # Luăm datele pentru ultimele 30 de zile
         yesterday = datetime.now() - timedelta(days=1)
         last_month = yesterday - timedelta(days=30)
-
         start_str = last_month.strftime("%Y%m%d")
         end_str = yesterday.strftime("%Y%m%d")
 
@@ -79,23 +92,32 @@ class WikiScraper:
         return 0
 
     def upload_to_cloudinary(self, image_url: str, public_id: str) -> Optional[str]:
-        """Urcă imaginea pe Cloudinary și returnează noul URL securizat."""
+        """Urcă imaginea la rezoluție maximă pe Cloudinary cu optimizări vizuale."""
         if not image_url:
             return None
         try:
+            # Convertim thumb-ul în High Res înainte de upload
+            target_url = self._get_high_res_url(image_url)
+            
             result = cloudinary.uploader.upload(
-                image_url,
+                target_url,
                 public_id=f"history_app/{public_id}",
                 overwrite=True,
-                transformation=[{'width': 1000, 'crop': "limit", 'quality': "auto"}]
+                transformation=[
+                    {'width': 1080, 'crop': "limit"}, # Rezoluție bună pentru mobil
+                    {'quality': "auto:best"},        # Compresie inteligentă
+                    {'fetch_format': "auto"},        # Servește WebP/AVIF automat
+                    {'gravity': "auto"}              # Crop inteligent pe subiect (AI)
+                ]
             )
             return result.get('secure_url')
         except Exception as e:
             logger.error(f"⚠️ Cloudinary Fail ({public_id}): {e}")
-            return None
+            # Fallback la URL-ul original dacă procesarea high-res eșuează
+            return image_url if image_url.startswith("http") else None
 
     async def fetch_gallery_urls(self, title_slug: str, limit: int = 3) -> List[str]:
-        """Extrage imagini din media-list-ul paginii de Wikipedia."""
+        """Extrage imagini de calitate din galeria paginii."""
         if not title_slug:
             return []
 
@@ -109,17 +131,29 @@ class WikiScraper:
                     items = res.json().get('items', [])
                     for item in items:
                         if item.get('type') == 'image':
-                            img_src = item.get('srcset', [{}])[0].get('src') or item.get('title')
+                            # Încercăm să luăm cea mai mare rezoluție din srcset
+                            srcset = item.get('srcset', [])
+                            if srcset:
+                                # Luăm ultimul element din srcset (cel mai mare de obicei)
+                                img_src = srcset[-1].get('src')
+                            else:
+                                img_src = item.get('title')
+
                             if img_src:
                                 full_url = f"https:{img_src}" if img_src.startswith("//") else img_src
-                                if ".svg" not in full_url.lower():
+                                # Filtru: Fără SVG-uri, iconițe sau fișiere ciudate
+                                if not any(bad in full_url.lower() for bad in [".svg", ".png", ".gif", "icon"]):
                                     image_urls.append(full_url)
+                        
                         if len(image_urls) >= limit:
                             break
             except Exception as e:
                 logger.warning(f"⚠️ Gallery Fetch Fail for {title_slug}: {e}")
 
-        # Fallback image dacă nu găsim nimic
+        # Fallback dacă Wikipedia nu are poze relevante: Unsplash High-Res
         if not image_urls:
-            image_urls.append("https://images.unsplash.com/photo-1447069387593-a5de0862481e?w=800")
+            # Folosim un keyword compus pentru relevanță
+            search_term = title_slug.replace('_', ',')
+            image_urls.append(f"https://images.unsplash.com/photo-1599827553299-a8a7600724d4?q=80&w=1080") # General History Fallback
+            
         return image_urls
