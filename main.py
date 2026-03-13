@@ -81,12 +81,15 @@ async def main():
     scraper, processor, ranker = WikiScraper(), AIProcessor(), ScoringEngine()
 
     try:
+        # 1. Fetch evenimente
         raw_events = await scraper.fetch_today()
         for item in raw_events:
             item['h_score'] = ranker.heuristic_score(item)
 
+        # 2. Top candidați pentru AI
         candidates = sorted(raw_events, key=lambda x: x['h_score'], reverse=True)[:config.MAX_CANDIDATES_FOR_AI]
         
+        # 3. Batch Scoring și Page Views
         ai_data = await processor.batch_score_and_categorize(candidates)
         ai_results = ai_data.get('results', {})
         
@@ -103,54 +106,53 @@ async def main():
             })
             item['final_score'] = ranker.calculate_final_score(item['h_score'], item['score'], item['views'])
 
+        # 4. Clasament final și Narațiuni
         candidates.sort(key=lambda x: x.get('final_score', 0), reverse=True)
         top_5 = candidates[:5]
-
-        # ... (partea de sus a main() rămâne neschimbată până la narratives_map) ...
-        # 4. Generare Narațiuni
         narratives_map = await processor.generate_secondary_narratives(top_5)
 
+        # 5. Procesare Imagini și Asamblare Evenimente
         final_events_list = []
         for idx, item in enumerate(top_5):
             slug = item.get('slug', 'history')
             year = item.get('year', 0)
             slug_clean = slug.replace('_', ' ') if slug else "history"
 
-            # 1. Luăm o poză PRO (Unsplash/Pexels) - Prioritate Maximă
+            # --- LOGICA IMAGINI ANTI-DUPLICAT ---
             hero_url = await scraper.fetch_pro_image(slug_clean)
-            
-            # 2. Luăm galerie de pe Wiki (Cerem maxim 2 ca să nu declanșăm 429)
-            wiki_urls = await scraper.fetch_gallery_urls(slug, limit=2)
+            wiki_urls = await scraper.fetch_gallery_urls(slug, limit=3)
             
             combined_sources = []
+            seen_urls = set()
+
+            # A. Prioritate 1: Poza Pro (Unsplash/Pexels)
             if hero_url:
                 combined_sources.append(hero_url)
+                seen_urls.add(hero_url)
             
-            # Completăm cu Wiki doar până la total de 3 poze
+            # B. Prioritate 2: Galerie Wiki (până la total de 3)
             for w_url in wiki_urls:
-                # FILTRU EXTRA: Nu uploada GIF-uri (produc erori de mărime/429 des)
-                if ".gif" in w_url.lower():
-                    continue
-                    
-                if len(combined_sources) < 3:
-                    if w_url not in combined_sources:
-                        combined_sources.append(w_url)
+                if len(combined_sources) >= 3:
+                    break
+                # Verificăm duplicat sau GIF
+                if w_url not in seen_urls and ".gif" not in w_url.lower():
+                    combined_sources.append(w_url)
+                    seen_urls.add(w_url)
 
-            # 3. Upload secvențial sau cu delay mic pentru a evita 429
+            # 6. Upload cu delay pentru a evita eroarea 429
             gallery = []
             for i, url in enumerate(combined_sources):
                 img_url = await safe_upload(scraper, url, f"ev_{year}_{i}")
                 if img_url:
                     gallery.append(img_url)
-                # Mică pauză între upload-uri pentru a nu stresa serverele Wiki
                 await asyncio.sleep(0.5) 
 
-            # 4. Fallback la thumbnail-ul standard dacă galeria e goală
+            # Fallback: Dacă galeria e goală (erori de upload), încercăm thumb-ul original
             if not gallery and item.get('wiki_thumb'):
                 fb_img = await safe_upload(scraper, item.get('wiki_thumb'), f"ev_{year}_fb")
                 gallery = [fb_img] if fb_img else []
 
-            # --- ASAMBLARE EVENIMENT ---
+            # Adăugare în listă finală
             final_events_list.append(EventDetail(
                 category=EventCategory(item['category'].lower()),
                 year=year,
@@ -163,7 +165,7 @@ async def main():
                 gallery=gallery
             ))
 
-        # 5. ASAMBLARE PAYLOAD
+        # 7. Trimitere Payload
         payload = DailyPayload(
             date_processed=datetime.now().date(),
             events=final_events_list,
