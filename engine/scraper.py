@@ -1,7 +1,7 @@
 import httpx
 import cloudinary
 import cloudinary.uploader
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from datetime import datetime, timedelta
 
 from core.config import config
@@ -18,131 +18,146 @@ class WikiScraper:
             api_secret=config.CLOUDINARY_API_SECRET
         )
 
-    async def _get_safe_high_res_url(self, url: str) -> str:
+    async def _get_image_metadata(self, url: str) -> Tuple[int, int]:
         """
-        Verifică dacă imaginea originală (High Res) este sub limita de 10MB.
-        Dacă e prea mare, returnează URL-ul de thumbnail care e deja optimizat.
+        Interoghează API-ul Wikipedia pentru a afla rezoluția reală a fișierului.
         """
-        if not url or "upload.wikimedia.org" not in url:
-            return url
+        if "upload.wikimedia.org" not in url:
+            return (0, 0)
         
-        # Generăm URL-ul pentru imaginea originală (full res)
+        file_name = url.split('/')[-1]
+        if 'px-' in file_name: # Dacă e thumbnail, extragem numele original
+             file_name = file_name.split('-', 1)[1]
+        
+        api_url = f"https://en.wikipedia.org/w/api.php?action=query&titles=File:{file_name}&prop=imageinfo&iiprop=size&format=json"
+        
+        try:
+            async with httpx.AsyncClient(headers=self.headers, timeout=5.0) as client:
+                res = await client.get(api_url)
+                pages = res.json().get('query', {}).get('pages', {})
+                for p in pages.values():
+                    info = p.get('imageinfo', [{}])[0]
+                    return info.get('width', 0), info.get('height', 0)
+        except:
+            return (0, 0)
+        return (0, 0)
+
+    async def _is_valid_high_res(self, url: str) -> Optional[str]:
+        """
+        Verifică dacă imaginea are peste 1000px și sub 10MB.
+        Returnează URL-ul final (high-res) sau None.
+        """
+        if not url: return None
+        
+        # Transformăm în URL de rezoluție maximă
         high_res_url = url
         if "/thumb/" in url:
             parts = url.replace("/thumb/", "/").split("/")
-            if 'px-' in parts[-1]:
-                high_res_url = "/".join(parts[:-1])
-            else:
-                high_res_url = "/".join(parts)
+            high_res_url = "/".join(parts[:-1]) if 'px-' in parts[-1] else "/".join(parts)
 
-        # Verificăm mărimea fișierului fără a-l descărca complet (HTTP HEAD)
         try:
             async with httpx.AsyncClient(headers=self.headers, timeout=5.0) as client:
                 head = await client.head(high_res_url, follow_redirects=True)
                 size = int(head.headers.get("Content-Length", 0))
                 
-                # Limita Cloudinary Free este 10,485,760 bytes
-                if size > 10000000: 
-                    logger.warning(f"📏 Fișier prea mare ({size/1e6:.1f}MB). Folosesc varianta optimizată.")
-                    return url # Returnăm URL-ul original de thumbnail (calitate medie)
+                # Check 1: Mărime fișier (Limita Cloudinary 10MB)
+                if size > 10400000: return None 
+                
+                # Check 2: Rezoluție (pixeli)
+                w, h = await self._get_image_metadata(high_res_url)
+                if w < 1000 and h < 1000: # Prea mică pentru "calitate înaltă"
+                    return None
+                    
                 return high_res_url
-        except Exception:
-            return url
+        except:
+            return None
 
-    async def fetch_today(self) -> List[dict]:
-        now = datetime.now()
-        url = f"{config.WIKI_BASE_URL}/feed/onthisday/events/{now.month}/{now.day}"
-
-        async with httpx.AsyncClient(headers=self.headers, timeout=30.0) as client:
-            try:
-                response = await client.get(url)
-                response.raise_for_status()
-                data = response.json()
-                raw_events = data.get('selected', []) + data.get('events', [])
-
-                processed_events = []
-                for event in raw_events:
-                    pages = event.get('pages', [])
-                    slug = pages[0].get('titles', {}).get('canonical') if pages else None
-                    thumbnail = pages[0].get('thumbnail', {}).get('source') if pages else None
-
-                    processed_events.append({
-                        "year": event.get('year'),
-                        "text": event.get('text'),
-                        "slug": slug,
-                        "wiki_thumb": thumbnail
-                    })
-                return processed_events
-            except Exception as e:
-                logger.error(f"❌ Wiki API Error: {e}")
-                return []
+    async def fetch_unsplash_fallback(self, query: str) -> Optional[str]:
+        """Căutăm o poză artistică pe Unsplash dacă Wikipedia e slabă."""
+        # Notă: Necesită un Access Key în config.UNSPLASH_ACCESS_KEY
+        url = "https://api.unsplash.com/search/photos"
+        params = {
+            "query": query,
+            "per_page": 1,
+            "orientation": "landscape",
+            "client_id": getattr(config, 'UNSPLASH_ACCESS_KEY', '')
+        }
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                res = await client.get(url, params=params)
+                if res.status_code == 200:
+                    results = res.json().get('results', [])
+                    if results: return results[0]['urls']['regular']
+        except: pass
+        return None
 
     def upload_to_cloudinary(self, image_url: str, public_id: str) -> Optional[str]:
-        """Urcă imaginea pe Cloudinary cu procesare AI pentru încadrare."""
-        if not image_url:
-            return None
+        """Upload cu procesare AI pentru estetică maximă."""
+        if not image_url: return None
         try:
             result = cloudinary.uploader.upload(
                 image_url,
                 public_id=f"history_app/{public_id}",
                 overwrite=True,
                 transformation=[
-                    {'width': 1200, 'crop': "limit"}, 
-                    {'quality': "auto:good"},
+                    {'width': 1280, 'height': 720, 'crop': "fill"}, # Format cinematic
+                    {'quality': "auto:best"},
                     {'fetch_format': "auto"},
-                    {'gravity': "auto"} # AI detectează subiectul principal pentru crop
+                    {'gravity': "auto"} # AI Crop pe subiect
                 ]
             )
             return result.get('secure_url')
         except Exception as e:
-            logger.error(f"⚠️ Cloudinary Fail ({public_id}): {e}")
+            logger.error(f"⚠️ Cloudinary Fail: {e}")
             return None
 
     async def fetch_gallery_urls(self, title_slug: str, limit: int = 3) -> List[str]:
-        """Extrage imagini de calitate, evitând hărți/iconițe/SVG."""
+        """Extrage doar poze 'reale' și mari."""
         if not title_slug: return []
         
-        image_urls = []
-        url = f"{config.WIKI_BASE_URL}/page/media-list/{title_slug.replace(' ', '_')}"
+        valid_urls = []
+        wiki_media_url = f"{config.WIKI_BASE_URL}/page/media-list/{title_slug.replace(' ', '_')}"
 
         async with httpx.AsyncClient(headers=self.headers, timeout=15.0) as client:
             try:
-                res = await client.get(url)
+                res = await client.get(wiki_media_url)
                 if res.status_code == 200:
                     items = res.json().get('items', [])
                     for item in items:
                         if item.get('type') == 'image':
-                            srcset = item.get('srcset', [])
-                            # Alegem cea mai mare variantă disponibilă din listă
-                            best_src = srcset[-1].get('src') if srcset else item.get('title')
+                            src = item.get('srcset', [{}])[-1].get('src') or item.get('title')
+                            full_url = f"https:{src}" if src.startswith("//") else src
                             
-                            if best_src:
-                                full_url = f"https:{best_src}" if best_src.startswith("//") else best_src
-                                # Filtru strict pentru calitate vizuală
-                                if not any(bad in full_url.lower() for bad in [".svg", ".png", "icon", "logo", "map"]):
-                                    # Verificăm mărimea și obținem URL-ul safe
-                                    safe_url = await self._get_safe_high_res_url(full_url)
-                                    image_urls.append(safe_url)
+                            # Filtru 1: Excludem gunoaiele vizuale
+                            if any(bad in full_url.lower() for bad in [".svg", ".png", "icon", "logo", "map", "flag"]):
+                                continue
+                                
+                            # Filtru 2: Check Rezoluție & Mărime
+                            safe_url = await self._is_valid_high_res(full_url)
+                            if safe_url:
+                                valid_urls.append(safe_url)
                         
-                        if len(image_urls) >= limit: break
-            except Exception as e:
-                logger.warning(f"⚠️ Gallery Fetch Fail for {title_slug}: {e}")
+                        if len(valid_urls) >= limit: break
+            except: pass
 
-        if not image_urls:
-            image_urls.append("https://images.unsplash.com/photo-1447069387593-a5de0862481e?q=80&w=1200")
+        # FALLBACK: Dacă n-avem poze bune pe Wiki, luăm una artistică de pe Unsplash
+        if not valid_urls:
+            unsplash_url = await self.fetch_unsplash_fallback(title_slug)
+            if unsplash_url: valid_urls.append(unsplash_url)
+            else: valid_urls.append("https://images.unsplash.com/photo-1447069387593-a5de0862481e?q=80&w=1280")
             
-        return image_urls
+        return valid_urls
 
     async def fetch_page_views(self, title_slug: str) -> int:
+        # Păstrat neschimbat (este corect în versiunea ta)
         if not title_slug or title_slug == "history": return 0
         yesterday = datetime.now() - timedelta(days=1)
         last_month = yesterday - timedelta(days=30)
         url = f"https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/user/{title_slug}/daily/{last_month.strftime('%Y%m%d')}/{yesterday.strftime('%Y%m%d')}"
-
         async with httpx.AsyncClient(headers=self.headers, timeout=10.0) as client:
             try:
                 res = await client.get(url)
                 if res.status_code == 200:
                     return sum(item['views'] for item in res.json().get('items', []))
-            except Exception: pass
+            except: pass
         return 0
