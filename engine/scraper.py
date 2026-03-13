@@ -86,16 +86,26 @@ class WikiScraper:
     async def fetch_gallery_urls(self, title_slug: str, limit: int = 3) -> List[str]:
         valid_urls = []
         wiki_media_url = f"{config.WIKI_BASE_URL}/page/media-list/{title_slug.replace(' ', '_')}"
+        
         async with httpx.AsyncClient(headers=self.headers, timeout=15.0) as client:
             try:
                 res = await client.get(wiki_media_url)
                 if res.status_code == 200:
-                    for item in res.json().get('items', []):
+                    items = res.json().get('items', [])
+                    for item in items:
+                        # Filtrăm fișierele problematice (SVG, hărți, fișiere prea mari)
                         if item.get('type') == 'image' and not any(x in item.get('title','').lower() for x in [".svg", ".png", "map", "flag"]):
+                            # Luăm URL-ul optimizat de 2000px (nu cel original de 50MPx)
                             opt_url = await self._get_optimized_wiki_url(item.get('title'))
-                            if opt_url: valid_urls.append(opt_url)
-                        if len(valid_urls) >= limit: break
-            except: pass
+                            if opt_url:
+                                valid_urls.append(opt_url)
+                        
+                        # LIMITĂM AICI: Dacă am ajuns la limita cerută de Wiki, ne oprim
+                        if len(valid_urls) >= limit: 
+                            break
+            except Exception as e:
+                logger.error(f"Gallery fetch error: {e}")
+                
         return valid_urls
 
     def upload_to_cloudinary(self, image_url: str, public_id: str) -> Optional[str]:

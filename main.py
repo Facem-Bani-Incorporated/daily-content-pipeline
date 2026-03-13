@@ -106,6 +106,7 @@ async def main():
         candidates.sort(key=lambda x: x.get('final_score', 0), reverse=True)
         top_5 = candidates[:5]
 
+        # ... (partea de sus a main() rămâne neschimbată până la narratives_map) ...
         narratives_map = await processor.generate_secondary_narratives(top_5)
 
         final_events_list = []
@@ -114,21 +115,42 @@ async def main():
             year = item.get('year', 0)
             slug_clean = slug.replace('_', ' ') if slug else "history"
 
+            # --- LOGICA CORECTĂ PENTRU IMAGINI (Max 3 total) ---
+            
+            # 1. Încercăm să luăm poza "Hero" (Pexels)
             hero_url = await scraper.fetch_pro_image(slug_clean)
+            
+            # 2. Luăm galeria de pe Wiki (cerem doar 3 pentru siguranță)
             wiki_urls = await scraper.fetch_gallery_urls(slug, limit=3)
             
             combined_sources = []
-            if hero_url: combined_sources.append(hero_url)
-            for w_url in wiki_urls:
-                if w_url not in combined_sources: combined_sources.append(w_url)
             
-            img_tasks = [safe_upload(scraper, url, f"ev_{year}_{i}") for i, url in enumerate(combined_sources[:3])]
+            # Adăugăm prima poză HQ dacă există
+            if hero_url:
+                combined_sources.append(hero_url)
+            
+            # Completăm cu poze de pe Wiki până la MAXIM 3 poze în total
+            for w_url in wiki_urls:
+                if len(combined_sources) < 3:
+                    if w_url not in combined_sources:
+                        combined_sources.append(w_url)
+                else:
+                    break # Ne oprim la 3 surse total
+
+            # 3. Upload pe Cloudinary (folosind safe_upload pentru a evita blocajele)
+            # Parametrul folder_name devine prefix pentru public_id
+            img_tasks = [
+                safe_upload(scraper, url, f"ev_{year}_{i}") 
+                for i, url in enumerate(combined_sources)
+            ]
             gallery = [img for img in await asyncio.gather(*img_tasks) if img]
 
+            # 4. Fallback: Dacă Cloudinary a respins totul sau sursele au fost goale
             if not gallery and item.get('wiki_thumb'):
                 fb_img = await safe_upload(scraper, item.get('wiki_thumb'), f"ev_{year}_fb")
                 gallery = [fb_img] if fb_img else []
 
+            # --- ASAMBLARE EVENIMENT ---
             final_events_list.append(EventDetail(
                 category=EventCategory(item['category'].lower()),
                 year=year,
@@ -141,6 +163,7 @@ async def main():
                 gallery=gallery
             ))
 
+        # 5. ASAMBLARE ȘI TRIMITERE PAYLOAD
         payload = DailyPayload(
             date_processed=datetime.now().date(),
             events=final_events_list,
