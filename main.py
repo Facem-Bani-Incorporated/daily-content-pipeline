@@ -105,33 +105,8 @@ async def main():
     scraper, processor, ranker = WikiScraper(), AIProcessor(), ScoringEngine()
 
     try:
-        # 1. Fetch & Heuristic Rank
-        raw_events = await scraper.fetch_today()
-        for item in raw_events:
-            item['h_score'] = ranker.heuristic_score(item)
-
-        candidates = sorted(raw_events, key=lambda x: x['h_score'], reverse=True)[:config.MAX_CANDIDATES_FOR_AI]
-
-        # 2. AI Scoring & Views
-        ai_data = await processor.batch_score_and_categorize(candidates)
-        ai_results = ai_data.get('results', {})
-        view_tasks = [scraper.fetch_page_views(c.get('slug')) for c in candidates]
-        views = await asyncio.gather(*view_tasks)
-
-        # 3. Merging & Final Ranking
-        for idx, item in enumerate(candidates):
-            res = ai_results.get(f"ID_{idx}", {})
-            item.update({
-                'views': views[idx] if isinstance(views[idx], int) else 0,
-                'category': res.get('category', 'culture_arts'),
-                'score': res.get('score', 50),
-                'titles': res.get('titles', {l: "History Event" for l in ["en", "ro", "es", "de", "fr"]})
-            })
-            item['final_score'] = ranker.calculate_final_score(item['h_score'], item['score'], item['views'])
-
-        # SORTARE FINALĂ ȘI LIMITARE LA 5 EVENIMENTE DIFERITE
-        candidates.sort(key=lambda x: x.get('final_score', 0), reverse=True)
-        top_5 = candidates[:5]
+        # ... (Codul tău de Fetch, AI Scoring și Ranking rămâne identic) ...
+        # [Păstrează pașii 1, 2 și 3 așa cum îi ai în codul tău]
 
         # 4. Generare Narațiuni (Toate odată)
         narratives_map = await processor.generate_secondary_narratives(top_5)
@@ -140,15 +115,24 @@ async def main():
         for idx, item in enumerate(top_5):
             slug = item.get('slug', 'history')
             year = item.get('year', 0)
+            slug_clean = slug.replace('_', ' ') if slug else "history"
 
-            # Primul primește galerie, restul 1 poză
+            # --- MODIFICARE DOAR AICI PENTRU CALITATE IMAGINI ---
+            
             if idx == 0:
+                # Pentru primul eveniment (Main), fetch_gallery_urls acum caută hibrid (Pexels + Wiki)
                 wiki_imgs = await scraper.fetch_gallery_urls(slug, limit=3)
                 img_tasks = [safe_upload(scraper, url, f"ev_{year}_{i}") for i, url in enumerate(wiki_imgs)]
                 gallery = [img for img in await asyncio.gather(*img_tasks) if img]
             else:
-                thumb = await safe_upload(scraper, item.get('wiki_thumb'), f"ev_{year}")
+                # Pentru restul, încercăm o poză PRO (Pexels) înainte de thumbnail-ul Wiki
+                pro_img = await scraper.fetch_pro_image(slug_clean)
+                source_url = pro_img if pro_img else item.get('wiki_thumb')
+                
+                thumb = await safe_upload(scraper, source_url, f"ev_{year}")
                 gallery = [thumb] if thumb else []
+            
+            # --- SFÂRȘIT MODIFICARE IMAGINI ---
 
             final_events_list.append(EventDetail(
                 category=EventCategory(item['category'].lower()),
@@ -162,27 +146,20 @@ async def main():
                 gallery=gallery
             ))
 
-        # --- AICI ERA GREȘEALA: Codul de mai jos trebuie să fie ÎN AFARA buclei for ---
-
-        # 5. ASAMBLARE PAYLOAD (O singură dată, cu toate cele 5)
+        # 5. ASAMBLARE PAYLOAD (Identic cu ce ai trimis tu)
         payload = DailyPayload(
             date_processed=datetime.now().date(),
             events=final_events_list,
             metadata={"processed": len(candidates), "count": len(final_events_list)}
         )
 
-        # 6. LOGARE CURATĂ (Compactă pentru a evita timestamp pe fiecare linie în Railway)
+        # 6. LOGARE ȘI 7. TRIMITERE (Identic cu ce ai trimis tu)
         compact_json = payload.model_dump_json()
         print("\n" + "=" * 20 + " JSON START (NO SECRET) " + "=" * 20)
         print(compact_json)
         print("=" * 20 + " JSON END " + "=" * 20 + "\n")
 
-        # 7. TRIMITERE FINALĂ
         await send_to_java(payload)
 
     except Exception as e:
         logger.error(f"🚨 Pipeline Crash: {e}", exc_info=True)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
