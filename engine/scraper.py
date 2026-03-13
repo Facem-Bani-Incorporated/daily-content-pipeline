@@ -23,10 +23,11 @@ class WikiScraper:
         )
 
     async def fetch_pro_image(self, query: str) -> Optional[str]:
-    """Caută o poză HQ pe Pexels."""
-    if not hasattr(config, 'PEXELS_API_KEY'): return None
-    
-    url = f"https://api.pexels.com/v1/search?query={query}&per_page=1"
+        """Caută o poză HQ pe Pexels."""  # <--- Aici trebuie indentat (4 spații)
+        if not self.pexels_key:           # <--- Și aici la fel
+            return None
+            
+        url = f"https://api.pexels.com/v1/search?query={query}&per_page=1"
     headers = {"Authorization": config.PEXELS_API_KEY}
     
     try:

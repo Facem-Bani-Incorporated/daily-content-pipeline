@@ -108,47 +108,67 @@ async def main():
         # ... (Codul tău de Fetch, AI Scoring și Ranking rămâne identic) ...
         # [Păstrează pașii 1, 2 și 3 așa cum îi ai în codul tău]
 
-       # 4. Generare Narațiuni (Identic cu ce ai deja)
+       Eroarea IndentationError apare pentru că în Python, imediat după ce definești o funcție cu def nume_functie():, următorul rând trebuie să fie indentat (de obicei cu 4 spații sau un Tab).
+
+Dacă ai copiat codul și rândul cu docstring-ul (textul dintre ghilimele) a rămas la aceeași margine cu def, containerul crapă.
+
+Iată cum trebuie să arate codul tău în engine/scraper.py pentru a fi corect sintactic:
+
+Fix pentru engine/scraper.py
+Verifică linia 25-26. Trebuie să existe un spațiu clar de indentare în fața textului:
+
+Python
+# ... restul codului de sus ...
+
+    async def fetch_pro_image(self, query: str) -> Optional[str]:
+        """Caută o poză HQ pe Pexels."""  # <--- Aici trebuie indentat (4 spații)
+        if not self.pexels_key:           # <--- Și aici la fel
+            return None
+            
+        url = f"https://api.pexels.com/v1/search?query={query}&per_page=1"
+        # ... restul funcției ...
+Versiunea completă și sigură pentru main.py
+Pentru a evita eroarea 500 (care de obicei vine din diferențe de formatare la semnătura HMAC), am „curățat” codul astfel încât să adăugăm doar logica de poze HQ, păstrând neschimbat restul.
+
+Înlocuiește bucla de procesare a evenimentelor din main.py cu aceasta:
+
+Python
+        # 4. Generare Narațiuni (Păstrează-l pe cel existent)
         narratives_map = await processor.generate_secondary_narratives(top_5)
 
         final_events_list = []
         for idx, item in enumerate(top_5):
             slug = item.get('slug', 'history')
             year = item.get('year', 0)
-            # Curățăm slug-ul pentru o căutare mai bună pe Unsplash (ex: "French_Revolution" -> "French Revolution")
-            search_query = slug.replace('_', ' ')
+            slug_clean = slug.replace('_', ' ') if slug else "history"
 
-            # --- LOGICA NOUĂ PENTRU IMAGINI HIBRIDE ---
+            # --- LOGICA NOUĂ: Prima poză HQ, restul Wiki ---
             
-            # Pas A: Încercăm să luăm o poză High-Quality de pe Unsplash/Pexels
-            hero_img_url = await scraper.fetch_pro_image(search_query)
+            # 1. Căutăm poza principală (Hero) pe Pexels/Unsplash
+            hero_url = await scraper.fetch_pro_image(slug_clean)
             
-            # Pas B: Luăm restul pozelor de pe Wiki
-            wiki_imgs = await scraper.fetch_gallery_urls(slug, limit=3)
+            # 2. Luăm galeria documentară de pe Wiki
+            wiki_urls = await scraper.fetch_gallery_urls(slug, limit=3)
             
-            # Pas C: Combinăm - Prima e cea Pro, restul sunt Wiki
-            # Folosim un set pentru a evita duplicatele dacă Wiki dă aceeași poză
-            combined_urls = []
-            if hero_img_url:
-                combined_urls.append(hero_img_url)
+            # 3. Le unim: Prima să fie cea HQ
+            combined_sources = []
+            if hero_url:
+                combined_sources.append(hero_url)
             
-            for w_url in wiki_imgs:
-                if w_url not in combined_urls:
-                    combined_urls.append(w_url)
-
-            # Limităm galeria totală la 3-4 poze ca să nu încărcăm baza de date
-            final_urls = combined_urls[:3]
-
-            # Pas D: Upload pe Cloudinary (asincron)
-            img_tasks = [safe_upload(scraper, url, f"ev_{year}_{i}") for i, url in enumerate(final_urls)]
+            for w_url in wiki_urls:
+                if w_url not in combined_sources:
+                    combined_sources.append(w_url)
+            
+            # 4. Upload asincron (Max 3 poze per eveniment)
+            img_tasks = [safe_upload(scraper, url, f"ev_{year}_{i}") for i, url in enumerate(combined_sources[:3])]
             gallery = [img for img in await asyncio.gather(*img_tasks) if img]
-            
-            # Dacă galeria e goală (n-a mers nimic), punem un placeholder sau thumb-ul de la wiki
-            if not gallery and item.get('wiki_thumb'):
-                thumb = await safe_upload(scraper, item.get('wiki_thumb'), f"ev_{year}_fb")
-                gallery = [thumb] if thumb else []
 
-            # --- SFÂRȘIT LOGICĂ IMAGINI ---
+            # Fallback dacă totul a eșuat
+            if not gallery and item.get('wiki_thumb'):
+                fb_img = await safe_upload(scraper, item.get('wiki_thumb'), f"ev_{year}_fb")
+                gallery = [fb_img] if fb_img else []
+
+            # --- FINAL LOGICĂ POZE ---
 
             final_events_list.append(EventDetail(
                 category=EventCategory(item['category'].lower()),
