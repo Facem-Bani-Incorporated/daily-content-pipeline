@@ -108,31 +108,47 @@ async def main():
         # ... (Codul tău de Fetch, AI Scoring și Ranking rămâne identic) ...
         # [Păstrează pașii 1, 2 și 3 așa cum îi ai în codul tău]
 
-        # 4. Generare Narațiuni (Toate odată)
+       # 4. Generare Narațiuni (Identic cu ce ai deja)
         narratives_map = await processor.generate_secondary_narratives(top_5)
 
         final_events_list = []
         for idx, item in enumerate(top_5):
             slug = item.get('slug', 'history')
             year = item.get('year', 0)
-            slug_clean = slug.replace('_', ' ') if slug else "history"
+            # Curățăm slug-ul pentru o căutare mai bună pe Unsplash (ex: "French_Revolution" -> "French Revolution")
+            search_query = slug.replace('_', ' ')
 
-            # --- MODIFICARE DOAR AICI PENTRU CALITATE IMAGINI ---
+            # --- LOGICA NOUĂ PENTRU IMAGINI HIBRIDE ---
             
-            if idx == 0:
-                # Pentru primul eveniment (Main), fetch_gallery_urls acum caută hibrid (Pexels + Wiki)
-                wiki_imgs = await scraper.fetch_gallery_urls(slug, limit=3)
-                img_tasks = [safe_upload(scraper, url, f"ev_{year}_{i}") for i, url in enumerate(wiki_imgs)]
-                gallery = [img for img in await asyncio.gather(*img_tasks) if img]
-            else:
-                # Pentru restul, încercăm o poză PRO (Pexels) înainte de thumbnail-ul Wiki
-                pro_img = await scraper.fetch_pro_image(slug_clean)
-                source_url = pro_img if pro_img else item.get('wiki_thumb')
-                
-                thumb = await safe_upload(scraper, source_url, f"ev_{year}")
+            # Pas A: Încercăm să luăm o poză High-Quality de pe Unsplash/Pexels
+            hero_img_url = await scraper.fetch_pro_image(search_query)
+            
+            # Pas B: Luăm restul pozelor de pe Wiki
+            wiki_imgs = await scraper.fetch_gallery_urls(slug, limit=3)
+            
+            # Pas C: Combinăm - Prima e cea Pro, restul sunt Wiki
+            # Folosim un set pentru a evita duplicatele dacă Wiki dă aceeași poză
+            combined_urls = []
+            if hero_img_url:
+                combined_urls.append(hero_img_url)
+            
+            for w_url in wiki_imgs:
+                if w_url not in combined_urls:
+                    combined_urls.append(w_url)
+
+            # Limităm galeria totală la 3-4 poze ca să nu încărcăm baza de date
+            final_urls = combined_urls[:3]
+
+            # Pas D: Upload pe Cloudinary (asincron)
+            img_tasks = [safe_upload(scraper, url, f"ev_{year}_{i}") for i, url in enumerate(final_urls)]
+            gallery = [img for img in await asyncio.gather(*img_tasks) if img]
+            
+            # Dacă galeria e goală (n-a mers nimic), punem un placeholder sau thumb-ul de la wiki
+            if not gallery and item.get('wiki_thumb'):
+                thumb = await safe_upload(scraper, item.get('wiki_thumb'), f"ev_{year}_fb")
                 gallery = [thumb] if thumb else []
-            
-            # --- SFÂRȘIT MODIFICARE IMAGINI ---
+
+            # --- SFÂRȘIT LOGICĂ IMAGINI ---
 
             final_events_list.append(EventDetail(
                 category=EventCategory(item['category'].lower()),

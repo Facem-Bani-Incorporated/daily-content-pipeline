@@ -23,25 +23,23 @@ class WikiScraper:
         )
 
     async def fetch_pro_image(self, query: str) -> Optional[str]:
-        """Caută o imagine 4K pe Pexels pentru a evita pixelarea de pe Wiki."""
-        if not self.pexels_key:
-            return None
-            
-        url = f"https://api.pexels.com/v1/search?query={query}&per_page=1&orientation=landscape"
-        headers = {"Authorization": self.pexels_key}
-        
-        try:
-            async with httpx.AsyncClient(headers=headers, timeout=10.0) as client:
-                res = await client.get(url)
-                if res.status_code == 200:
-                    photos = res.json().get('photos', [])
-                    if photos:
-                        # Luăm versiunea 'large2x' sau 'original'
-                        # Cloudinary se va ocupa să o aducă sub 10MB
-                        return photos[0]['src']['large2x']
-        except Exception as e:
-            logger.warning(f"Pexels API unreachable for {query}: {e}")
-        return None
+    """Caută o poză HQ pe Pexels."""
+    if not hasattr(config, 'PEXELS_API_KEY'): return None
+    
+    url = f"https://api.pexels.com/v1/search?query={query}&per_page=1"
+    headers = {"Authorization": config.PEXELS_API_KEY}
+    
+    try:
+        async with httpx.AsyncClient(headers=headers, timeout=5.0) as client:
+            res = await client.get(url)
+            if res.status_code == 200:
+                photos = res.json().get('photos', [])
+                if photos:
+                    # Returnăm variabila 'large2x' pentru calitate maximă
+                    return photos[0]['src']['large2x']
+    except Exception:
+        pass
+    return None
 
     async def fetch_today(self) -> List[dict]:
         now = datetime.now()
