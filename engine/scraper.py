@@ -92,29 +92,45 @@ class WikiScraper:
         return 0
 
     def upload_to_cloudinary(self, image_url: str, public_id: str) -> Optional[str]:
-        """Urcă imaginea la rezoluție maximă pe Cloudinary cu optimizări vizuale."""
+        """Urcă imaginea pe Cloudinary, cu fallback la rezoluție medie dacă originalul e prea mare."""
         if not image_url:
             return None
-        try:
-            # Convertim thumb-ul în High Res înainte de upload
-            target_url = self._get_high_res_url(image_url)
-            
-            result = cloudinary.uploader.upload(
-                target_url,
-                public_id=f"history_app/{public_id}",
-                overwrite=True,
-                transformation=[
-                    {'width': 1080, 'crop': "limit"}, # Rezoluție bună pentru mobil
-                    {'quality': "auto:best"},        # Compresie inteligentă
-                    {'fetch_format': "auto"},        # Servește WebP/AVIF automat
-                    {'gravity': "auto"}              # Crop inteligent pe subiect (AI)
-                ]
-            )
-            return result.get('secure_url')
-        except Exception as e:
-            logger.error(f"⚠️ Cloudinary Fail ({public_id}): {e}")
-            # Fallback la URL-ul original dacă procesarea high-res eșuează
-            return image_url if image_url.startswith("http") else None
+        
+        # Încercăm variantele în ordine descrescătoare a calității
+        # 1. Original (High Res)
+        # 2. Wikipedia-generated 2048px (Calitate foarte bună, dimensiune mică)
+        # 3. Wikipedia-generated 1024px
+        sources_to_try = [
+            self._get_high_res_url(image_url),
+            image_url.replace("/thumb/", "/").split(".jpg")[0] + ".jpg/2048px-" + image_url.split("/")[-1] if "/thumb/" in image_url else None,
+            image_url # Thumbnail-ul original primit din API
+        ]
+
+        for target_url in sources_to_try:
+            if not target_url: continue
+            try:
+                result = cloudinary.uploader.upload(
+                    target_url,
+                    public_id=f"history_app/{public_id}",
+                    overwrite=True,
+                    transformation=[
+                        {'width': 1080, 'crop': "limit"},
+                        {'quality': "auto:best"},
+                        {'fetch_format': "auto"},
+                        {'gravity': "auto"}
+                    ]
+                )
+                return result.get('secure_url')
+            except Exception as e:
+                # Dacă eroarea e legată de mărime ("File size too large"), continuăm la următoarea sursă
+                if "File size too large" in str(e):
+                    logger.warning(f"⚠️ Source too big for {public_id}, trying smaller version...")
+                    continue
+                else:
+                    logger.error(f"⚠️ Cloudinary Fail ({public_id}): {e}")
+                    break
+        
+        return None
 
     async def fetch_gallery_urls(self, title_slug: str, limit: int = 3) -> List[str]:
         """Extrage imagini de calitate din galeria paginii."""
