@@ -87,7 +87,7 @@ async def send_to_java(payload: DailyPayload):
                 logger.info(f"✅ SUCCESS! ID returnat: {response.text}")
             else:
                 logger.error(f"❌ Status {response.status_code}: {response.text}")
-                logger.error(f"❌ Body trimis era: {body_json}")
+                logger.error(f"❌ Body trimis era asta: {body_json}")
         except Exception as e:
             logger.error(f"🚨 Eroare conexiune: {e}")
 
