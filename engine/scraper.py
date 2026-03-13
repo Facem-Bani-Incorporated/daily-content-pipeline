@@ -38,9 +38,11 @@ class WikiScraper:
             logger.warning(f"Pexels fetch failed: {e}")
         return None
 
-    async def fetch_today(self) -> List[dict]:
-        now = datetime.now()
-        url = f"{config.WIKI_BASE_URL}/feed/onthisday/events/{now.month}/{now.day}"
+    async def fetch_tomorrow(self) -> List[dict]:
+        """Fetch events for TOMORROW instead of today."""
+        target = datetime.now() + timedelta(days=1)
+        url = f"{config.WIKI_BASE_URL}/feed/onthisday/events/{target.month}/{target.day}"
+        
         async with httpx.AsyncClient(headers=self.headers, timeout=30.0) as client:
             try:
                 response = await client.get(url)
@@ -54,7 +56,7 @@ class WikiScraper:
                     "wiki_thumb": e.get('pages', [{}])[0].get('thumbnail', {}).get('source') if e.get('pages') else None
                 } for e in raw_events]
             except Exception as e:
-                logger.error(f"❌ Wiki API Error: {e}")
+                logger.error(f"❌ Wiki API Error (Tomorrow): {e}")
                 return []
 
     async def fetch_page_views(self, title_slug: str) -> int:

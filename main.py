@@ -5,7 +5,7 @@ import hashlib
 import time
 import base64
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from core.logger import setup_logger
 from core.config import config
@@ -63,7 +63,7 @@ async def send_to_java(payload: DailyPayload):
             logger.info(f"📤 Sending to Java: {target_url}")
             response = await client.post(target_url, content=body_bytes, headers=headers)
             if response.status_code in [200, 201]:
-                logger.info(f"✅ SUCCESS! ID returnat: {response.text}")
+                logger.info(f"✅ SUCCESS! Payload accepted for date: {payload.date_processed}")
             else:
                 logger.error(f"❌ Status {response.status_code}: {response.text}")
         except Exception as e:
@@ -77,12 +77,15 @@ async def safe_upload(scraper, url, folder_name):
         return None
 
 async def main():
-    logger.info("🚀 Starting Unified Pipeline...")
+    logger.info("🚀 Starting Pipeline for TOMORROW's events...")
     scraper, processor, ranker = WikiScraper(), AIProcessor(), ScoringEngine()
+    
+    # CALCULĂM DATA DE MÂINE
+    tomorrow_date = datetime.now() + timedelta(days=1)
 
     try:
-        # 1. Fetch evenimente
-        raw_events = await scraper.fetch_today()
+        # 1. Fetch evenimente pentru mâine
+        raw_events = await scraper.fetch_tomorrow()
         for item in raw_events:
             item['h_score'] = ranker.heuristic_score(item)
 
@@ -118,45 +121,39 @@ async def main():
             year = item.get('year', 0)
             slug_clean = slug.replace('_', ' ') if slug else "history"
 
-            # --- LOGICA IMAGINI ANTI-DUPLICAT ---
             hero_url = await scraper.fetch_pro_image(slug_clean)
             wiki_urls = await scraper.fetch_gallery_urls(slug, limit=3)
             
             combined_sources = []
             seen_urls = set()
 
-            # A. Prioritate 1: Poza Pro (Unsplash/Pexels)
             if hero_url:
                 combined_sources.append(hero_url)
                 seen_urls.add(hero_url)
             
-            # B. Prioritate 2: Galerie Wiki (până la total de 3)
             for w_url in wiki_urls:
-                if len(combined_sources) >= 3:
-                    break
-                # Verificăm duplicat sau GIF
+                if len(combined_sources) >= 3: break
                 if w_url not in seen_urls and ".gif" not in w_url.lower():
                     combined_sources.append(w_url)
                     seen_urls.add(w_url)
 
-            # 6. Upload cu delay pentru a evita eroarea 429
+            # 6. Upload
             gallery = []
             for i, url in enumerate(combined_sources):
-                img_url = await safe_upload(scraper, url, f"ev_{year}_{i}")
+                img_url = await safe_upload(scraper, url, f"tomorrow_ev_{year}_{i}")
                 if img_url:
                     gallery.append(img_url)
                 await asyncio.sleep(0.5) 
 
-            # Fallback: Dacă galeria e goală (erori de upload), încercăm thumb-ul original
             if not gallery and item.get('wiki_thumb'):
-                fb_img = await safe_upload(scraper, item.get('wiki_thumb'), f"ev_{year}_fb")
+                fb_img = await safe_upload(scraper, item.get('wiki_thumb'), f"tomorrow_ev_{year}_fb")
                 gallery = [fb_img] if fb_img else []
 
-            # Adăugare în listă finală
+            # Adăugare eveniment cu data de MÂINE
             final_events_list.append(EventDetail(
                 category=EventCategory(item['category'].lower()),
                 year=year,
-                event_date=datetime.now().date(),
+                event_date=tomorrow_date.date(), # DATA MÂINE
                 source_url=f"https://en.wikipedia.org/wiki/{slug}",
                 title_translations=Translations(**item['titles']),
                 narrative_translations=Translations(**narratives_map.get(f"EVENT_{idx}", {})),
@@ -165,11 +162,11 @@ async def main():
                 gallery=gallery
             ))
 
-        # 7. Trimitere Payload
+        # 7. Trimitere Payload pentru data de MÂINE
         payload = DailyPayload(
-            date_processed=datetime.now().date(),
+            date_processed=tomorrow_date.date(),
             events=final_events_list,
-            metadata={"processed": len(candidates), "count": len(final_events_list)}
+            metadata={"processed": len(candidates), "target_date": str(tomorrow_date.date())}
         )
 
         await send_to_java(payload)
