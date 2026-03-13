@@ -14,7 +14,7 @@ class WikiScraper:
     def __init__(self):
         self.headers = {"User-Agent": config.USER_AGENT}
 
-        # Configurăm Cloudinary folosind obiectul Settings validat de Pydantic
+        # Configurăm Cloudinary
         cloudinary.config(
             cloud_name=config.CLOUDINARY_CLOUD_NAME,
             api_key=config.CLOUDINARY_API_KEY,
@@ -23,24 +23,21 @@ class WikiScraper:
 
     def _get_high_res_url(self, url: str) -> str:
         """
-        Transformă un URL de thumbnail Wikipedia în URL-ul imaginii originale.
-        Exemplu: dintr-un thumb de 200px extrage sursa originală de câțiva MB.
+        Încearcă să obțină URL-ul imaginii originale eliminând segmentul de thumbnail.
         """
         if not url or "upload.wikimedia.org" not in url:
             return url
         
         if "/thumb/" in url:
-            # Structura URL-ului de thumb la Wiki: .../thumb/a/a1/Nume.jpg/200px-Nume.jpg
-            # Eliminăm '/thumb/' și ultima parte (dimensiunea) pentru a obține originalul.
             parts = url.replace("/thumb/", "/").split("/")
-            # Verificăm dacă ultima parte este o redimensionare (ex: '200px-...')
-            if parts[-1].lower().endswith(('.jpg', '.jpeg', '.png', '.webp')) and 'px-' in parts[-1]:
+            # Dacă URL-ul se termină cu o dimensiune (ex: 200px-Nume.jpg), o eliminăm
+            if 'px-' in parts[-1]:
                 return "/".join(parts[:-1])
             return "/".join(parts)
         return url
 
     async def fetch_today(self) -> List[dict]:
-        """Extrage evenimentele zilei și pregătește slug-urile pentru procesare."""
+        """Extrage evenimentele zilei de pe Wikipedia."""
         now = datetime.now()
         url = f"{config.WIKI_BASE_URL}/feed/onthisday/events/{now.month}/{now.day}"
 
@@ -70,7 +67,7 @@ class WikiScraper:
                 return []
 
     async def fetch_page_views(self, title_slug: str) -> int:
-        """Calculăm vizualizările totale folosind slug-ul corect."""
+        """Obține numărul de vizualizări pentru ultimele 30 de zile."""
         if not title_slug or title_slug == "history":
             return 0
 
@@ -92,48 +89,47 @@ class WikiScraper:
         return 0
 
     def upload_to_cloudinary(self, image_url: str, public_id: str) -> Optional[str]:
-        """Urcă imaginea pe Cloudinary, cu fallback la rezoluție medie dacă originalul e prea mare."""
+        """
+        Urcă imaginea pe Cloudinary. Încearcă High-Res, iar dacă e prea mare (>10MB),
+        folosește automat thumbnail-ul original ca fallback.
+        """
         if not image_url:
             return None
         
-        # Încercăm variantele în ordine descrescătoare a calității
-        # 1. Original (High Res)
-        # 2. Wikipedia-generated 2048px (Calitate foarte bună, dimensiune mică)
-        # 3. Wikipedia-generated 1024px
-        sources_to_try = [
-            self._get_high_res_url(image_url),
-            image_url.replace("/thumb/", "/").split(".jpg")[0] + ".jpg/2048px-" + image_url.split("/")[-1] if "/thumb/" in image_url else None,
-            image_url # Thumbnail-ul original primit din API
-        ]
+        # Surse de încercat: 1. Rezoluție Maximă, 2. Thumbnail standard (Fallback sigur)
+        high_res = self._get_high_res_url(image_url)
+        sources = [high_res, image_url]
+        
+        # Setăm transformările o singură dată
+        upload_params = {
+            "public_id": f"history_app/{public_id}",
+            "overwrite": True,
+            "transformation": [
+                {'width': 1080, 'crop': "limit"},
+                {'quality': "auto:best"},
+                {'fetch_format': "auto"},
+                {'gravity': "auto"}
+            ]
+        }
 
-        for target_url in sources_to_try:
-            if not target_url: continue
+        for source in sources:
+            if not source: continue
             try:
-                result = cloudinary.uploader.upload(
-                    target_url,
-                    public_id=f"history_app/{public_id}",
-                    overwrite=True,
-                    transformation=[
-                        {'width': 1080, 'crop': "limit"},
-                        {'quality': "auto:best"},
-                        {'fetch_format': "auto"},
-                        {'gravity': "auto"}
-                    ]
-                )
+                result = cloudinary.uploader.upload(source, **upload_params)
                 return result.get('secure_url')
             except Exception as e:
-                # Dacă eroarea e legată de mărime ("File size too large"), continuăm la următoarea sursă
-                if "File size too large" in str(e):
-                    logger.warning(f"⚠️ Source too big for {public_id}, trying smaller version...")
-                    continue
-                else:
-                    logger.error(f"⚠️ Cloudinary Fail ({public_id}): {e}")
-                    break
+                error_msg = str(e)
+                if "File size too large" in error_msg and source == high_res:
+                    logger.warning(f"⚠️ Original too big for {public_id}, falling back to standard thumb...")
+                    continue # Încearcă următoarea sursă din listă
+                
+                logger.error(f"⚠️ Cloudinary Fail ({public_id}): {error_msg}")
+                break # Dacă e altă eroare sau a eșuat și fallback-ul, ne oprim
         
         return None
 
     async def fetch_gallery_urls(self, title_slug: str, limit: int = 3) -> List[str]:
-        """Extrage imagini de calitate din galeria paginii."""
+        """Extrage imagini de calitate din media-list, filtrând elementele neadecvate."""
         if not title_slug:
             return []
 
@@ -147,18 +143,13 @@ class WikiScraper:
                     items = res.json().get('items', [])
                     for item in items:
                         if item.get('type') == 'image':
-                            # Încercăm să luăm cea mai mare rezoluție din srcset
                             srcset = item.get('srcset', [])
-                            if srcset:
-                                # Luăm ultimul element din srcset (cel mai mare de obicei)
-                                img_src = srcset[-1].get('src')
-                            else:
-                                img_src = item.get('title')
+                            img_src = srcset[-1].get('src') if srcset else item.get('title')
 
                             if img_src:
                                 full_url = f"https:{img_src}" if img_src.startswith("//") else img_src
-                                # Filtru: Fără SVG-uri, iconițe sau fișiere ciudate
-                                if not any(bad in full_url.lower() for bad in [".svg", ".png", ".gif", "icon"]):
+                                # Excludem formatele care nu sunt fotografii (hărți SVG, iconițe PNG)
+                                if not any(bad in full_url.lower() for bad in [".svg", ".png", ".gif", "icon", "logo"]):
                                     image_urls.append(full_url)
                         
                         if len(image_urls) >= limit:
@@ -166,10 +157,8 @@ class WikiScraper:
             except Exception as e:
                 logger.warning(f"⚠️ Gallery Fetch Fail for {title_slug}: {e}")
 
-        # Fallback dacă Wikipedia nu are poze relevante: Unsplash High-Res
+        # Fallback dacă nu s-a găsit nicio imagine validă pe Wikipedia
         if not image_urls:
-            # Folosim un keyword compus pentru relevanță
-            search_term = title_slug.replace('_', ',')
-            image_urls.append(f"https://images.unsplash.com/photo-1599827553299-a8a7600724d4?q=80&w=1080") # General History Fallback
+            image_urls.append("https://images.unsplash.com/photo-1447069387593-a5de0862481e?q=80&w=1080")
             
         return image_urls
