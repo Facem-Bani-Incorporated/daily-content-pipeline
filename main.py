@@ -1,62 +1,34 @@
 import asyncio
 import httpx
+import hmac
+import hashlib
+import time
+import base64
+import json
 from datetime import datetime
+
 from core.logger import setup_logger
 from core.config import config
 from engine.scraper import WikiScraper
 from engine.processor import AIProcessor
 from engine.ranker import ScoringEngine
 from schema.models import DailyPayload, EventDetail, EventCategory, Translations
-import hmac
-import hashlib
-import time
-import base64
 
 logger = setup_logger("MainPipeline")
 
-
 async def send_to_java(payload: DailyPayload):
+    """Trimite datele către Backend-ul Java folosind securitate HMAC-SHA256."""
     target_url = config.JAVA_BACKEND_URL
     secret = config.INTERNAL_API_SECRET
 
-    events_final = []
-    for ev in payload.events:
-        events_final.append({
-            "category": ev.category.value,
-            "titleTranslations": {
-                "en": ev.title_translations.en,
-                "ro": ev.title_translations.ro,
-                "es": ev.title_translations.es,
-                "de": ev.title_translations.de,
-                "fr": ev.title_translations.fr
-            },
-            "narrativeTranslations": {
-                "en": ev.narrative_translations.en,
-                "ro": ev.narrative_translations.ro,
-                "es": ev.narrative_translations.es,
-                "de": ev.narrative_translations.de,
-                "fr": ev.narrative_translations.fr
-            },
-            "eventDate": ev.event_date.isoformat(),
-            "impactScore": float(ev.impact_score),
-            "sourceUrl": str(ev.source_url),
-            "pageViews30d": int(ev.page_views_30d),
-            "gallery": ev.gallery if ev.gallery else []
-        })
+    # Serializăm payload-ul folosind Pydantic (mult mai rapid și sigur)
+    body_json = payload.model_dump_json()
+    body_bytes = body_json.encode('utf-8')
 
-    payload_to_serialize = {
-        "dateProcessed": payload.date_processed.isoformat(),
-        "events": events_final
-    }
-
-    import json
-    body_json = json.dumps(payload_to_serialize, separators=(',', ':'))
-    body_bytes = body_json.encode('utf-8')  # ✅ FIX 1: encode explicit la bytes
-
+    # Generăm semnătura de securitate
     timestamp = str(int(time.time()))
     auth_payload = f"{timestamp}.{body_json}"
-
-    # ✅ FIX 2: hmac.new → hmac.new e corect, dar verifică importul
+    
     signature = hmac.new(
         secret.encode('utf-8'),
         auth_payload.encode('utf-8'),
@@ -68,57 +40,59 @@ async def send_to_java(payload: DailyPayload):
     headers = {
         "X-Timestamp": timestamp,
         "X-Signature": signature_base64,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "User-Agent": "HistoryApp-Python-Pipeline/1.0"
     }
 
-    # ✅ FIX 3: Log body înainte să trimiți ca să verifici
-    logger.info(f"📦 Body trimis: {body_json[:200]}...")
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         try:
-            logger.info(f"📤 Sending to Java: {target_url}")
-            response = await client.post(
-                target_url,
-                content=body_bytes,  # ✅ bytes, nu string
-                headers=headers
-            )
-
+            logger.info(f"📤 Sending payload to Java ({len(payload.events)} events)...")
+            response = await client.post(target_url, content=body_bytes, headers=headers)
+            
             if response.status_code in [200, 201]:
-                logger.info(f"✅ SUCCESS! ID returnat: {response.text}")
+                logger.info(f"✅ SUCCESS! Backend Response: {response.text}")
             else:
-                logger.error(f"❌ Status {response.status_code}: {response.text}")
-                logger.error(f"❌ Body trimis era: {body_json}")
+                logger.error(f"❌ Java Error {response.status_code}: {response.text}")
         except Exception as e:
-            logger.error(f"🚨 Eroare conexiune: {e}")
+            logger.error(f"🚨 Connection failed: {e}")
 
-
-async def safe_upload(scraper, url, folder_name):
+async def safe_upload(scraper, url, public_id):
+    """Helper pentru upload asincron pe Cloudinary fără a bloca pipeline-ul."""
     if not url: return None
     try:
-        return await asyncio.to_thread(scraper.upload_to_cloudinary, url, folder_name)
-    except Exception:
+        # Folosim to_thread deoarece librăria cloudinary este sincronă (blocking)
+        return await asyncio.to_thread(scraper.upload_to_cloudinary, url, public_id)
+    except Exception as e:
+        logger.warning(f"⚠️ Upload failed for {public_id}: {e}")
         return None
 
-
 async def main():
-    logger.info("🚀 Starting Unified Pipeline (Top 5 Unique Events)...")
+    logger.info("🚀 Starting Unified Pipeline (Cinematic Edition)...")
     scraper, processor, ranker = WikiScraper(), AIProcessor(), ScoringEngine()
 
     try:
-        # 1. Fetch & Heuristic Rank
+        # 1. FETCH & INITIAL RANKING
         raw_events = await scraper.fetch_today()
+        if not raw_events:
+            logger.error("❌ No events fetched from Wiki. Aborting.")
+            return
+
         for item in raw_events:
             item['h_score'] = ranker.heuristic_score(item)
 
+        # Limităm candidații pentru procesarea AI (economie de tokeni)
         candidates = sorted(raw_events, key=lambda x: x['h_score'], reverse=True)[:config.MAX_CANDIDATES_FOR_AI]
 
-        # 2. AI Scoring & Views
+        # 2. AI SCORING & POPULARITY METRICS
+        logger.info(f"🧠 Processing {len(candidates)} candidates with AI & Metrics...")
         ai_data = await processor.batch_score_and_categorize(candidates)
         ai_results = ai_data.get('results', {})
+        
+        # Luăm view-urile în paralel
         view_tasks = [scraper.fetch_page_views(c.get('slug')) for c in candidates]
         views = await asyncio.gather(*view_tasks)
 
-        # 3. Merging & Final Ranking
+        # 3. MERGING & FINAL SELECTION (Top 5 Unique)
         for idx, item in enumerate(candidates):
             res = ai_results.get(f"ID_{idx}", {})
             item.update({
@@ -129,27 +103,35 @@ async def main():
             })
             item['final_score'] = ranker.calculate_final_score(item['h_score'], item['score'], item['views'])
 
-        # SORTARE FINALĂ ȘI LIMITARE LA 5 EVENIMENTE DIFERITE
         candidates.sort(key=lambda x: x.get('final_score', 0), reverse=True)
         top_5 = candidates[:5]
 
-        # 4. Generare Narațiuni (Toate odată)
+        # 4. NARRATIVE GENERATION (All 5 at once)
         narratives_map = await processor.generate_secondary_narratives(top_5)
 
+        # 5. CINEMATIC IMAGE PROCESSING
         final_events_list = []
         for idx, item in enumerate(top_5):
             slug = item.get('slug', 'history')
             year = item.get('year', 0)
+            logger.info(f"📸 Processing visuals for: {slug} ({year})")
 
-            # Primul primește galerie, restul 1 poză
+            # Strategie: Pentru evenimentul #1 căutăm pe Pexels + Galerie Wiki
+            # Pentru restul, încercăm Pexels, apoi Fallback pe Wiki Thumb
             if idx == 0:
+                # fetch_gallery_urls acum caută automat pe Pexels pentru prima poziție
                 wiki_imgs = await scraper.fetch_gallery_urls(slug, limit=3)
-                img_tasks = [safe_upload(scraper, url, f"ev_{year}_{i}") for i, url in enumerate(wiki_imgs)]
+                img_tasks = [safe_upload(scraper, url, f"ev_{year}_main_{i}") for i, url in enumerate(wiki_imgs)]
                 gallery = [img for img in await asyncio.gather(*img_tasks) if img]
             else:
-                thumb = await safe_upload(scraper, item.get('wiki_thumb'), f"ev_{year}")
+                # Căutăm o imagine Pro pe Pexels pentru claritate
+                pro_img = await scraper.fetch_pro_image(slug.replace('_', ' '))
+                source = pro_img if pro_img else item.get('wiki_thumb')
+                
+                thumb = await safe_upload(scraper, source, f"ev_{year}_{idx}")
                 gallery = [thumb] if thumb else []
 
+            # Adăugăm în lista finală
             final_events_list.append(EventDetail(
                 category=EventCategory(item['category'].lower()),
                 year=year,
@@ -162,27 +144,21 @@ async def main():
                 gallery=gallery
             ))
 
-        # --- AICI ERA GREȘEALA: Codul de mai jos trebuie să fie ÎN AFARA buclei for ---
-
-        # 5. ASAMBLARE PAYLOAD (O singură dată, cu toate cele 5)
+        # 6. ASAMBLARE PAYLOAD & SEND
         payload = DailyPayload(
             date_processed=datetime.now().date(),
             events=final_events_list,
-            metadata={"processed": len(candidates), "count": len(final_events_list)}
+            metadata={"processed": len(candidates), "source": "Hybrid-Wiki-Pexels"}
         )
 
-        # 6. LOGARE CURATĂ (Compactă pentru a evita timestamp pe fiecare linie în Railway)
-        compact_json = payload.model_dump_json()
-        print("\n" + "=" * 20 + " JSON START (NO SECRET) " + "=" * 20)
-        print(compact_json)
-        print("=" * 20 + " JSON END " + "=" * 20 + "\n")
-
-        # 7. TRIMITERE FINALĂ
+        # Debugging clean (Fără secrete în log-uri)
+        print("\n" + "═"*30 + " PAYLOAD READY " + "═"*30)
+        logger.info(f"Ready to send {len(final_events_list)} events to Java.")
+        
         await send_to_java(payload)
 
     except Exception as e:
         logger.error(f"🚨 Pipeline Crash: {e}", exc_info=True)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
