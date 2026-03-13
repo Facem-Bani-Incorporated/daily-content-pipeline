@@ -87,7 +87,7 @@ async def send_to_java(payload: DailyPayload):
                 logger.info(f"✅ SUCCESS! ID returnat: {response.text}")
             else:
                 logger.error(f"❌ Status {response.status_code}: {response.text}")
-                logger.error(f"❌ Body trimis era asta: {body_json}")
+                logger.error(f"❌ Body trimis era: {body_json}")
         except Exception as e:
             logger.error(f"🚨 Eroare conexiune: {e}")
 
@@ -140,16 +140,6 @@ async def main():
         for idx, item in enumerate(top_5):
             slug = item.get('slug', 'history')
             year = item.get('year', 0)
-            
-            # --- LOGICA PENTRU DATA CORECTĂ ---
-            # Luăm luna și ziua de azi, dar anul furnizat de Wikipedia
-            now = datetime.now()
-            try:
-                # Folosim anul din obiectul Wikipedia
-                event_date_obj = datetime(year=int(year), month=now.month, day=now.day).date()
-            except ValueError:
-                # Fallback în caz de ani BC sau formate ciudate (Python datetime suportă min an 1)
-                event_date_obj = datetime.now().date() 
 
             # Primul primește galerie, restul 1 poză
             if idx == 0:
@@ -163,7 +153,7 @@ async def main():
             final_events_list.append(EventDetail(
                 category=EventCategory(item['category'].lower()),
                 year=year,
-                event_date=event_date_obj, # <--- MODIFICAT AICI
+                event_date=datetime.now().date(),
                 source_url=f"https://en.wikipedia.org/wiki/{slug}",
                 title_translations=Translations(**item['titles']),
                 narrative_translations=Translations(**narratives_map.get(f"EVENT_{idx}", {})),
@@ -172,14 +162,16 @@ async def main():
                 gallery=gallery
             ))
 
-        # 5. ASAMBLARE PAYLOAD
+        # --- AICI ERA GREȘEALA: Codul de mai jos trebuie să fie ÎN AFARA buclei for ---
+
+        # 5. ASAMBLARE PAYLOAD (O singură dată, cu toate cele 5)
         payload = DailyPayload(
             date_processed=datetime.now().date(),
             events=final_events_list,
             metadata={"processed": len(candidates), "count": len(final_events_list)}
         )
 
-        # 6. LOGARE CURATĂ
+        # 6. LOGARE CURATĂ (Compactă pentru a evita timestamp pe fiecare linie în Railway)
         compact_json = payload.model_dump_json()
         print("\n" + "=" * 20 + " JSON START (NO SECRET) " + "=" * 20)
         print(compact_json)
@@ -190,3 +182,7 @@ async def main():
 
     except Exception as e:
         logger.error(f"🚨 Pipeline Crash: {e}", exc_info=True)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
