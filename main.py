@@ -1,148 +1,192 @@
+import asyncio
 import httpx
-import cloudinary
-import cloudinary.uploader
-from typing import Optional, List
-from datetime import datetime, timedelta
-
-from core.config import config
+from datetime import datetime
 from core.logger import setup_logger
+from core.config import config
+from engine.scraper import WikiScraper
+from engine.processor import AIProcessor
+from engine.ranker import ScoringEngine
+from schema.models import DailyPayload, EventDetail, EventCategory, Translations
+import hmac
+import hashlib
+import time
+import base64
 
-logger = setup_logger("Scraper")
+logger = setup_logger("MainPipeline")
 
-class WikiScraper:
-    def __init__(self):
-        self.headers = {"User-Agent": config.USER_AGENT}
-        cloudinary.config(
-            cloud_name=config.CLOUDINARY_CLOUD_NAME,
-            api_key=config.CLOUDINARY_API_KEY,
-            api_secret=config.CLOUDINARY_API_SECRET
+
+async def send_to_java(payload: DailyPayload):
+    target_url = config.JAVA_BACKEND_URL
+    secret = config.INTERNAL_API_SECRET
+
+    events_final = []
+    for ev in payload.events:
+        events_final.append({
+            "category": ev.category.value,
+            "titleTranslations": {
+                "en": ev.title_translations.en,
+                "ro": ev.title_translations.ro,
+                "es": ev.title_translations.es,
+                "de": ev.title_translations.de,
+                "fr": ev.title_translations.fr
+            },
+            "narrativeTranslations": {
+                "en": ev.narrative_translations.en,
+                "ro": ev.narrative_translations.ro,
+                "es": ev.narrative_translations.es,
+                "de": ev.narrative_translations.de,
+                "fr": ev.narrative_translations.fr
+            },
+            "eventDate": ev.event_date.isoformat(),
+            "impactScore": float(ev.impact_score),
+            "sourceUrl": str(ev.source_url),
+            "pageViews30d": int(ev.page_views_30d),
+            "gallery": ev.gallery if ev.gallery else []
+        })
+
+    payload_to_serialize = {
+        "dateProcessed": payload.date_processed.isoformat(),
+        "events": events_final
+    }
+
+    import json
+    body_json = json.dumps(payload_to_serialize, separators=(',', ':'))
+    body_bytes = body_json.encode('utf-8')  # ✅ FIX 1: encode explicit la bytes
+
+    timestamp = str(int(time.time()))
+    auth_payload = f"{timestamp}.{body_json}"
+
+    # ✅ FIX 2: hmac.new → hmac.new e corect, dar verifică importul
+    signature = hmac.new(
+        secret.encode('utf-8'),
+        auth_payload.encode('utf-8'),
+        hashlib.sha256
+    ).digest()
+
+    signature_base64 = base64.b64encode(signature).decode('utf-8')
+
+    headers = {
+        "X-Timestamp": timestamp,
+        "X-Signature": signature_base64,
+        "Content-Type": "application/json"
+    }
+
+    # ✅ FIX 3: Log body înainte să trimiți ca să verifici
+    logger.info(f"📦 Body trimis: {body_json[:200]}...")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            logger.info(f"📤 Sending to Java: {target_url}")
+            response = await client.post(
+                target_url,
+                content=body_bytes,  # ✅ bytes, nu string
+                headers=headers
+            )
+
+            if response.status_code in [200, 201]:
+                logger.info(f"✅ SUCCESS! ID returnat: {response.text}")
+            else:
+                logger.error(f"❌ Status {response.status_code}: {response.text}")
+                logger.error(f"❌ Body trimis era: {body_json}")
+        except Exception as e:
+            logger.error(f"🚨 Eroare conexiune: {e}")
+
+
+async def safe_upload(scraper, url, folder_name):
+    if not url: return None
+    try:
+        return await asyncio.to_thread(scraper.upload_to_cloudinary, url, folder_name)
+    except Exception:
+        return None
+
+
+async def main():
+    logger.info("🚀 Starting Unified Pipeline (Top 5 Unique Events)...")
+    scraper, processor, ranker = WikiScraper(), AIProcessor(), ScoringEngine()
+
+    try:
+        # 1. Fetch & Heuristic Rank
+        raw_events = await scraper.fetch_today()
+        for item in raw_events:
+            item['h_score'] = ranker.heuristic_score(item)
+
+        candidates = sorted(raw_events, key=lambda x: x['h_score'], reverse=True)[:config.MAX_CANDIDATES_FOR_AI]
+
+        # 2. AI Scoring & Views
+        ai_data = await processor.batch_score_and_categorize(candidates)
+        ai_results = ai_data.get('results', {})
+        view_tasks = [scraper.fetch_page_views(c.get('slug')) for c in candidates]
+        views = await asyncio.gather(*view_tasks)
+
+        # 3. Merging & Final Ranking
+        for idx, item in enumerate(candidates):
+            res = ai_results.get(f"ID_{idx}", {})
+            item.update({
+                'views': views[idx] if isinstance(views[idx], int) else 0,
+                'category': res.get('category', 'culture_arts'),
+                'score': res.get('score', 50),
+                'titles': res.get('titles', {l: "History Event" for l in ["en", "ro", "es", "de", "fr"]})
+            })
+            item['final_score'] = ranker.calculate_final_score(item['h_score'], item['score'], item['views'])
+
+        # SORTARE FINALĂ ȘI LIMITARE LA 5 EVENIMENTE DIFERITE
+        candidates.sort(key=lambda x: x.get('final_score', 0), reverse=True)
+        top_5 = candidates[:5]
+
+        # 4. Generare Narațiuni (Toate odată)
+        narratives_map = await processor.generate_secondary_narratives(top_5)
+
+        final_events_list = []
+        for idx, item in enumerate(top_5):
+            slug = item.get('slug', 'history')
+            year = item.get('year', 0)
+            
+            # --- LOGICA PENTRU DATA CORECTĂ ---
+            # Luăm luna și ziua de azi, dar anul furnizat de Wikipedia
+            now = datetime.now()
+            try:
+                # Folosim anul din obiectul Wikipedia
+                event_date_obj = datetime(year=int(year), month=now.month, day=now.day).date()
+            except ValueError:
+                # Fallback în caz de ani BC sau formate ciudate (Python datetime suportă min an 1)
+                event_date_obj = datetime.now().date() 
+
+            # Primul primește galerie, restul 1 poză
+            if idx == 0:
+                wiki_imgs = await scraper.fetch_gallery_urls(slug, limit=3)
+                img_tasks = [safe_upload(scraper, url, f"ev_{year}_{i}") for i, url in enumerate(wiki_imgs)]
+                gallery = [img for img in await asyncio.gather(*img_tasks) if img]
+            else:
+                thumb = await safe_upload(scraper, item.get('wiki_thumb'), f"ev_{year}")
+                gallery = [thumb] if thumb else []
+
+            final_events_list.append(EventDetail(
+                category=EventCategory(item['category'].lower()),
+                year=year,
+                event_date=event_date_obj, # <--- MODIFICAT AICI
+                source_url=f"https://en.wikipedia.org/wiki/{slug}",
+                title_translations=Translations(**item['titles']),
+                narrative_translations=Translations(**narratives_map.get(f"EVENT_{idx}", {})),
+                impact_score=float(item['final_score']),
+                page_views_30d=item['views'],
+                gallery=gallery
+            ))
+
+        # 5. ASAMBLARE PAYLOAD
+        payload = DailyPayload(
+            date_processed=datetime.now().date(),
+            events=final_events_list,
+            metadata={"processed": len(candidates), "count": len(final_events_list)}
         )
 
-    async def _get_safe_high_res_url(self, url: str) -> str:
-        """
-        Verifică dacă imaginea originală (High Res) este sub limita de 10MB.
-        Dacă e prea mare, returnează URL-ul de thumbnail care e deja optimizat.
-        """
-        if not url or "upload.wikimedia.org" not in url:
-            return url
-        
-        # Generăm URL-ul pentru imaginea originală (full res)
-        high_res_url = url
-        if "/thumb/" in url:
-            parts = url.replace("/thumb/", "/").split("/")
-            if 'px-' in parts[-1]:
-                high_res_url = "/".join(parts[:-1])
-            else:
-                high_res_url = "/".join(parts)
+        # 6. LOGARE CURATĂ
+        compact_json = payload.model_dump_json()
+        print("\n" + "=" * 20 + " JSON START (NO SECRET) " + "=" * 20)
+        print(compact_json)
+        print("=" * 20 + " JSON END " + "=" * 20 + "\n")
 
-        # Verificăm mărimea fișierului fără a-l descărca complet (HTTP HEAD)
-        try:
-            async with httpx.AsyncClient(headers=self.headers, timeout=5.0) as client:
-                head = await client.head(high_res_url, follow_redirects=True)
-                size = int(head.headers.get("Content-Length", 0))
-                
-                # Limita Cloudinary Free este 10,485,760 bytes
-                if size > 10000000: 
-                    logger.warning(f"📏 Fișier prea mare ({size/1e6:.1f}MB). Folosesc varianta optimizată.")
-                    return url # Returnăm URL-ul original de thumbnail (calitate medie)
-                return high_res_url
-        except Exception:
-            return url
+        # 7. TRIMITERE FINALĂ
+        await send_to_java(payload)
 
-    async def fetch_today(self) -> List[dict]:
-        now = datetime.now()
-        url = f"{config.WIKI_BASE_URL}/feed/onthisday/events/{now.month}/{now.day}"
-
-        async with httpx.AsyncClient(headers=self.headers, timeout=30.0) as client:
-            try:
-                response = await client.get(url)
-                response.raise_for_status()
-                data = response.json()
-                raw_events = data.get('selected', []) + data.get('events', [])
-
-                processed_events = []
-                for event in raw_events:
-                    pages = event.get('pages', [])
-                    slug = pages[0].get('titles', {}).get('canonical') if pages else None
-                    thumbnail = pages[0].get('thumbnail', {}).get('source') if pages else None
-
-                    processed_events.append({
-                        "year": event.get('year'),
-                        "text": event.get('text'),
-                        "slug": slug,
-                        "wiki_thumb": thumbnail
-                    })
-                return processed_events
-            except Exception as e:
-                logger.error(f"❌ Wiki API Error: {e}")
-                return []
-
-    def upload_to_cloudinary(self, image_url: str, public_id: str) -> Optional[str]:
-        """Urcă imaginea pe Cloudinary cu procesare AI pentru încadrare."""
-        if not image_url:
-            return None
-        try:
-            result = cloudinary.uploader.upload(
-                image_url,
-                public_id=f"history_app/{public_id}",
-                overwrite=True,
-                transformation=[
-                    {'width': 1200, 'crop': "limit"}, 
-                    {'quality': "auto:good"},
-                    {'fetch_format': "auto"},
-                    {'gravity': "auto"} # AI detectează subiectul principal pentru crop
-                ]
-            )
-            return result.get('secure_url')
-        except Exception as e:
-            logger.error(f"⚠️ Cloudinary Fail ({public_id}): {e}")
-            return None
-
-    async def fetch_gallery_urls(self, title_slug: str, limit: int = 3) -> List[str]:
-        """Extrage imagini de calitate, evitând hărți/iconițe/SVG."""
-        if not title_slug: return []
-        
-        image_urls = []
-        url = f"{config.WIKI_BASE_URL}/page/media-list/{title_slug.replace(' ', '_')}"
-
-        async with httpx.AsyncClient(headers=self.headers, timeout=15.0) as client:
-            try:
-                res = await client.get(url)
-                if res.status_code == 200:
-                    items = res.json().get('items', [])
-                    for item in items:
-                        if item.get('type') == 'image':
-                            srcset = item.get('srcset', [])
-                            # Alegem cea mai mare variantă disponibilă din listă
-                            best_src = srcset[-1].get('src') if srcset else item.get('title')
-                            
-                            if best_src:
-                                full_url = f"https:{best_src}" if best_src.startswith("//") else best_src
-                                # Filtru strict pentru calitate vizuală
-                                if not any(bad in full_url.lower() for bad in [".svg", ".png", "icon", "logo", "map"]):
-                                    # Verificăm mărimea și obținem URL-ul safe
-                                    safe_url = await self._get_safe_high_res_url(full_url)
-                                    image_urls.append(safe_url)
-                        
-                        if len(image_urls) >= limit: break
-            except Exception as e:
-                logger.warning(f"⚠️ Gallery Fetch Fail for {title_slug}: {e}")
-
-        if not image_urls:
-            image_urls.append("https://images.unsplash.com/photo-1447069387593-a5de0862481e?q=80&w=1200")
-            
-        return image_urls
-
-    async def fetch_page_views(self, title_slug: str) -> int:
-        if not title_slug or title_slug == "history": return 0
-        yesterday = datetime.now() - timedelta(days=1)
-        last_month = yesterday - timedelta(days=30)
-        url = f"https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/user/{title_slug}/daily/{last_month.strftime('%Y%m%d')}/{yesterday.strftime('%Y%m%d')}"
-
-        async with httpx.AsyncClient(headers=self.headers, timeout=10.0) as client:
-            try:
-                res = await client.get(url)
-                if res.status_code == 200:
-                    return sum(item['views'] for item in res.json().get('items', []))
-            except Exception: pass
-        return 0
+    except Exception as e:
+        logger.error(f"🚨 Pipeline Crash: {e}", exc_info=True)
