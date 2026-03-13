@@ -2,6 +2,8 @@ import httpx
 import cloudinary
 import cloudinary.uploader
 from typing import Optional, List, Tuple
+from datetime import datetime, timedelta
+
 from core.config import config
 from core.logger import setup_logger
 
@@ -16,12 +18,40 @@ class WikiScraper:
             api_secret=config.CLOUDINARY_API_SECRET
         )
 
+    async def fetch_today(self) -> List[dict]:
+        """Extrage evenimentele zilei (Reparat & Integrat)."""
+        now = datetime.now()
+        url = f"{config.WIKI_BASE_URL}/feed/onthisday/events/{now.month}/{now.day}"
+
+        async with httpx.AsyncClient(headers=self.headers, timeout=30.0) as client:
+            try:
+                response = await client.get(url)
+                response.raise_for_status()
+                data = response.json()
+                # Combinăm evenimentele selectate cu cele normale
+                raw_events = data.get('selected', []) + data.get('events', [])
+
+                processed_events = []
+                for event in raw_events:
+                    pages = event.get('pages', [])
+                    slug = pages[0].get('titles', {}).get('canonical') if pages else None
+                    # Luăm thumbnail-ul default ca backup
+                    thumbnail = pages[0].get('thumbnail', {}).get('source') if pages else None
+
+                    processed_events.append({
+                        "year": event.get('year'),
+                        "text": event.get('text'),
+                        "slug": slug,
+                        "wiki_thumb": thumbnail
+                    })
+                return processed_events
+            except Exception as e:
+                logger.error(f"❌ Wiki API Error: {e}")
+                return []
+
     async def _get_optimized_wiki_url(self, file_name: str, preferred_width: int = 2000) -> Optional[str]:
-        """
-        În loc să luăm originalul de 50MB, cerem un thumbnail de rezoluție mare (ex: 2000px).
-        Wiki va genera un JPG/WebP optimizat sub 10MB care arată impecabil pe orice ecran.
-        """
-        file_clean = file_name.replace("File:", "")
+        """Cere un thumbnail de 2000px de la Wiki pentru a rămâne sub 10MB dar la calitate maximă."""
+        file_clean = file_name.replace("File:", "").replace(" ", "_")
         api_url = (
             "https://en.wikipedia.org/w/api.php?action=query"
             f"&titles=File:{file_clean}&prop=imageinfo"
@@ -34,27 +64,24 @@ class WikiScraper:
                 pages = res.json().get('query', {}).get('pages', {})
                 for p in pages.values():
                     info = p.get('imageinfo', [{}])[0]
-                    # thumburl este generat de Wiki la lățimea cerută (iiurlwidth)
+                    # thumburl e secretul: e deja comprimat de Wiki sub 10MB
                     return info.get('thumburl') or info.get('url')
         except Exception as e:
-            logger.error(f"Error fetching high-res thumb: {e}")
+            logger.error(f"Error fetching high-res thumb for {file_name}: {e}")
         return None
 
     def upload_to_cloudinary(self, image_url: str, public_id: str) -> Optional[str]:
-        """Urcă pe Cloudinary cu Smart Crop și compresie extremă."""
+        """Upload cu Smart Crop AI."""
         if not image_url: return None
         try:
-            # Sfat de CTO: Folosim 'fetch' dacă imaginea e deja online sau 'upload'
             result = cloudinary.uploader.upload(
                 image_url,
                 public_id=f"history_app/{public_id}",
                 overwrite=True,
-                # Eager transformations: se fac la upload, nu la prima accesare
                 transformation=[
-                    # Crop inteligent bazat pe AI (g_auto) pentru a păstra fețele/subiectul
                     {'width': 1600, 'height': 900, 'crop': "fill", 'gravity': "auto"},
-                    {'quality': "auto:good"}, # 'best' uneori face fișiere prea mari fără motiv
-                    {'fetch_format': "auto"}  # Servește WebP/AVIF automat
+                    {'quality': "auto:good"}, 
+                    {'fetch_format': "auto"}
                 ]
             )
             return result.get('secure_url')
@@ -63,10 +90,10 @@ class WikiScraper:
             return None
 
     async def fetch_gallery_urls(self, title_slug: str, limit: int = 3) -> List[str]:
+        """Extrage imagini mari ignorând mizeriile vizuale (hărți, iconițe)."""
         if not title_slug: return []
         
         valid_urls = []
-        # Media-list e bun, dar uneori returnează prea multe icoane/hărți
         wiki_media_url = f"{config.WIKI_BASE_URL}/page/media-list/{title_slug.replace(' ', '_')}"
 
         async with httpx.AsyncClient(headers=self.headers, timeout=15.0) as client:
@@ -78,22 +105,19 @@ class WikiScraper:
                         if item.get('type') == 'image':
                             file_title = item.get('title')
                             
-                            # 1. Filtrare agresivă "Anti-Gunoaie"
-                            bad_keywords = [".svg", ".png", "icon", "logo", "map", "flag", "dispute", "edit-clear"]
+                            # Filtrare: Fără hărți, flag-uri sau diagrame
+                            bad_keywords = [".svg", ".png", "icon", "logo", "map", "flag", "dispute", "chart", "diagram"]
                             if any(bad in file_title.lower() for bad in bad_keywords):
                                 continue
 
-                            # 2. Cerem versiunea de 2000px, nu originalul (pentru a fi sub 10MB)
                             optimized_url = await self._get_optimized_wiki_url(file_title)
-                            
                             if optimized_url:
                                 valid_urls.append(optimized_url)
                         
                         if len(valid_urls) >= limit: break
             except Exception as e:
-                logger.error(f"Gallery fetch error: {e}")
+                logger.error(f"Gallery fetch error for {title_slug}: {e}")
 
-        # Fallback de siguranță (Păstrat dar îmbunătățit)
         if not valid_urls:
             valid_urls.append("https://images.unsplash.com/photo-1447069387593-a5de0862481e?q=80&w=1600")
             
