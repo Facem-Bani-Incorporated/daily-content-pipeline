@@ -18,15 +18,43 @@ class WikiScraper:
             api_secret=config.CLOUDINARY_API_SECRET
         )
 
+    async def fetch_today(self) -> List[dict]:
+        """Extrage evenimentele zilei de pe Wikipedia."""
+        now = datetime.now()
+        url = f"{config.WIKI_BASE_URL}/feed/onthisday/events/{now.month}/{now.day}"
+
+        async with httpx.AsyncClient(headers=self.headers, timeout=30.0) as client:
+            try:
+                response = await client.get(url)
+                response.raise_for_status()
+                data = response.json()
+                raw_events = data.get('selected', []) + data.get('events', [])
+
+                processed_events = []
+                for event in raw_events:
+                    pages = event.get('pages', [])
+                    slug = pages[0].get('titles', {}).get('canonical') if pages else None
+                    thumbnail = pages[0].get('thumbnail', {}).get('source') if pages else None
+
+                    processed_events.append({
+                        "year": event.get('year'),
+                        "text": event.get('text'),
+                        "slug": slug,
+                        "wiki_thumb": thumbnail
+                    })
+                return processed_events
+            except Exception as e:
+                logger.error(f"❌ Wiki API Error: {e}")
+                return []
+
     async def _get_image_metadata(self, url: str) -> Tuple[int, int]:
-        """
-        Interoghează API-ul Wikipedia pentru a afla rezoluția reală a fișierului.
-        """
+        """Află rezoluția reală a fișierului de pe Wiki API."""
         if "upload.wikimedia.org" not in url:
             return (0, 0)
         
+        # Extragem numele fișierului curat
         file_name = url.split('/')[-1]
-        if 'px-' in file_name: # Dacă e thumbnail, extragem numele original
+        if 'px-' in file_name:
              file_name = file_name.split('-', 1)[1]
         
         api_url = f"https://en.wikipedia.org/w/api.php?action=query&titles=File:{file_name}&prop=imageinfo&iiprop=size&format=json"
@@ -43,13 +71,10 @@ class WikiScraper:
         return (0, 0)
 
     async def _is_valid_high_res(self, url: str) -> Optional[str]:
-        """
-        Verifică dacă imaginea are peste 1000px și sub 10MB.
-        Returnează URL-ul final (high-res) sau None.
-        """
+        """Verifică dimensiunea (<10MB) și rezoluția (>1000px)."""
         if not url: return None
         
-        # Transformăm în URL de rezoluție maximă
+        # Forțăm URL-ul de rezoluție maximă (original)
         high_res_url = url
         if "/thumb/" in url:
             parts = url.replace("/thumb/", "/").split("/")
@@ -60,39 +85,19 @@ class WikiScraper:
                 head = await client.head(high_res_url, follow_redirects=True)
                 size = int(head.headers.get("Content-Length", 0))
                 
-                # Check 1: Mărime fișier (Limita Cloudinary 10MB)
-                if size > 10400000: return None 
+                if size > 10400000: # Limita 10MB
+                    return None 
                 
-                # Check 2: Rezoluție (pixeli)
                 w, h = await self._get_image_metadata(high_res_url)
-                if w < 1000 and h < 1000: # Prea mică pentru "calitate înaltă"
+                if w < 800 and h < 800: # Am coborât puțin la 800px să fim mai permisivi
                     return None
                     
                 return high_res_url
         except:
             return None
 
-    async def fetch_unsplash_fallback(self, query: str) -> Optional[str]:
-        """Căutăm o poză artistică pe Unsplash dacă Wikipedia e slabă."""
-        # Notă: Necesită un Access Key în config.UNSPLASH_ACCESS_KEY
-        url = "https://api.unsplash.com/search/photos"
-        params = {
-            "query": query,
-            "per_page": 1,
-            "orientation": "landscape",
-            "client_id": getattr(config, 'UNSPLASH_ACCESS_KEY', '')
-        }
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                res = await client.get(url, params=params)
-                if res.status_code == 200:
-                    results = res.json().get('results', [])
-                    if results: return results[0]['urls']['regular']
-        except: pass
-        return None
-
     def upload_to_cloudinary(self, image_url: str, public_id: str) -> Optional[str]:
-        """Upload cu procesare AI pentru estetică maximă."""
+        """Urcă pe Cloudinary cu Smart Crop AI."""
         if not image_url: return None
         try:
             result = cloudinary.uploader.upload(
@@ -100,10 +105,10 @@ class WikiScraper:
                 public_id=f"history_app/{public_id}",
                 overwrite=True,
                 transformation=[
-                    {'width': 1280, 'height': 720, 'crop': "fill"}, # Format cinematic
+                    {'width': 1280, 'height': 720, 'crop': "fill"},
                     {'quality': "auto:best"},
                     {'fetch_format': "auto"},
-                    {'gravity': "auto"} # AI Crop pe subiect
+                    {'gravity': "auto"}
                 ]
             )
             return result.get('secure_url')
@@ -112,7 +117,7 @@ class WikiScraper:
             return None
 
     async def fetch_gallery_urls(self, title_slug: str, limit: int = 3) -> List[str]:
-        """Extrage doar poze 'reale' și mari."""
+        """Extrage imagini mari și relevante."""
         if not title_slug: return []
         
         valid_urls = []
@@ -128,11 +133,10 @@ class WikiScraper:
                             src = item.get('srcset', [{}])[-1].get('src') or item.get('title')
                             full_url = f"https:{src}" if src.startswith("//") else src
                             
-                            # Filtru 1: Excludem gunoaiele vizuale
+                            # Excludem gunoaiele vizuale
                             if any(bad in full_url.lower() for bad in [".svg", ".png", "icon", "logo", "map", "flag"]):
                                 continue
                                 
-                            # Filtru 2: Check Rezoluție & Mărime
                             safe_url = await self._is_valid_high_res(full_url)
                             if safe_url:
                                 valid_urls.append(safe_url)
@@ -140,16 +144,13 @@ class WikiScraper:
                         if len(valid_urls) >= limit: break
             except: pass
 
-        # FALLBACK: Dacă n-avem poze bune pe Wiki, luăm una artistică de pe Unsplash
+        # Fallback Unsplash dacă Wiki e goală
         if not valid_urls:
-            unsplash_url = await self.fetch_unsplash_fallback(title_slug)
-            if unsplash_url: valid_urls.append(unsplash_url)
-            else: valid_urls.append("https://images.unsplash.com/photo-1447069387593-a5de0862481e?q=80&w=1280")
+            valid_urls.append("https://images.unsplash.com/photo-1447069387593-a5de0862481e?q=80&w=1280")
             
         return valid_urls
 
     async def fetch_page_views(self, title_slug: str) -> int:
-        # Păstrat neschimbat (este corect în versiunea ta)
         if not title_slug or title_slug == "history": return 0
         yesterday = datetime.now() - timedelta(days=1)
         last_month = yesterday - timedelta(days=30)
