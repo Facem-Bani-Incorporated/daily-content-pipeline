@@ -1,10 +1,8 @@
 import httpx
 import cloudinary
 import cloudinary.uploader
-from typing import Optional, List, Tuple
+from typing import Optional, List
 from datetime import datetime, timedelta
-import asyncio
-
 from core.config import config
 from core.logger import setup_logger
 
@@ -13,7 +11,6 @@ logger = setup_logger("Scraper")
 class WikiScraper:
     def __init__(self):
         self.headers = {"User-Agent": config.USER_AGENT}
-        # Adaugă PEXELS_API_KEY în config-ul tău/env
         self.pexels_key = getattr(config, "PEXELS_API_KEY", None)
         
         cloudinary.config(
@@ -23,24 +20,23 @@ class WikiScraper:
         )
 
     async def fetch_pro_image(self, query: str) -> Optional[str]:
-        """Caută o poză HQ pe Pexels."""  # <--- Aici trebuie indentat (4 spații)
-        if not self.pexels_key:           # <--- Și aici la fel
+        """Caută o poză HQ pe Pexels."""
+        if not self.pexels_key:
             return None
             
         url = f"https://api.pexels.com/v1/search?query={query}&per_page=1"
-    headers = {"Authorization": config.PEXELS_API_KEY}
-    
-    try:
-        async with httpx.AsyncClient(headers=headers, timeout=5.0) as client:
-            res = await client.get(url)
-            if res.status_code == 200:
-                photos = res.json().get('photos', [])
-                if photos:
-                    # Returnăm variabila 'large2x' pentru calitate maximă
-                    return photos[0]['src']['large2x']
-    except Exception:
-        pass
-    return None
+        headers = {"Authorization": self.pexels_key}
+        
+        try:
+            async with httpx.AsyncClient(headers=headers, timeout=5.0) as client:
+                res = await client.get(url)
+                if res.status_code == 200:
+                    photos = res.json().get('photos', [])
+                    if photos:
+                        return photos[0]['src']['large2x']
+        except Exception as e:
+            logger.warning(f"Pexels fetch failed: {e}")
+        return None
 
     async def fetch_today(self) -> List[dict]:
         now = datetime.now()
@@ -76,7 +72,6 @@ class WikiScraper:
         return 0
 
     async def _get_optimized_wiki_url(self, file_name: str) -> Optional[str]:
-        """Cere thumb de 2000px de la Wiki (deja procesat, nu pixelat)."""
         file_clean = file_name.replace("File:", "").replace(" ", "_")
         api_url = f"https://en.wikipedia.org/w/api.php?action=query&titles=File:{file_clean}&prop=imageinfo&iiprop=url|size&iiurlwidth=2000&format=json"
         try:
@@ -90,11 +85,6 @@ class WikiScraper:
 
     async def fetch_gallery_urls(self, title_slug: str, limit: int = 3) -> List[str]:
         valid_urls = []
-        # Încercăm prima dată o imagine profesională pentru titlu
-        pro_img = await self.fetch_pro_image(title_slug.replace('_', ' '))
-        if pro_img:
-            valid_urls.append(pro_img)
-
         wiki_media_url = f"{config.WIKI_BASE_URL}/page/media-list/{title_slug.replace(' ', '_')}"
         async with httpx.AsyncClient(headers=self.headers, timeout=15.0) as client:
             try:
@@ -106,10 +96,9 @@ class WikiScraper:
                             if opt_url: valid_urls.append(opt_url)
                         if len(valid_urls) >= limit: break
             except: pass
-        return valid_urls if valid_urls else ["https://images.pexels.com/photos/209661/pexels-photo-209661.jpeg?auto=compress&cs=tinysrgb&w=1600"]
+        return valid_urls
 
     def upload_to_cloudinary(self, image_url: str, public_id: str) -> Optional[str]:
-        """Upload cu setări anti-pixelare (dpr_auto, q_auto:best)."""
         if not image_url: return None
         try:
             result = cloudinary.uploader.upload(
@@ -117,13 +106,11 @@ class WikiScraper:
                 public_id=f"history_app/{public_id}",
                 overwrite=True,
                 transformation=[
-                    # 'limit' nu face upscale dacă sursa e mică (previne pixelarea)
                     {'width': 1920, 'height': 1080, 'crop': "limit"},
-                    # 'fill' cu gravity auto pentru focus pe subiect
                     {'width': 1600, 'height': 900, 'crop': "fill", 'gravity': "auto"},
                     {'quality': "auto:best"},
                     {'fetch_format': "auto"},
-                    {'dpr': "auto"} # Esențial pentru ecrane de iPhone/Samsung noi
+                    {'dpr': "auto"}
                 ]
             )
             return result.get('secure_url')
