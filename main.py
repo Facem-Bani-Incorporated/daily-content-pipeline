@@ -41,7 +41,6 @@ async def send_to_java(payload: DailyPayload):
 
     body_json = json.dumps(payload_to_serialize, separators=(",", ":"))
     body_bytes = body_json.encode("utf-8")
-
     timestamp = str(int(time.time()))
     auth_payload = f"{timestamp}.{body_json}"
 
@@ -50,7 +49,6 @@ async def send_to_java(payload: DailyPayload):
         auth_payload.encode("utf-8"),
         hashlib.sha256,
     ).digest()
-
     signature_base64 = base64.b64encode(signature).decode("utf-8")
 
     headers = {
@@ -81,88 +79,94 @@ async def safe_upload(scraper: WikiScraper, url: str, public_id: str):
 
 
 async def main():
-    logger.info("🚀 Starting Pipeline for TOMORROW's events (AI-driven)...")
+    logger.info("🚀 Starting Pipeline for TOMORROW's events (AI-driven, 60→15→5)...")
 
     scraper = WikiScraper()
     processor = AIProcessor()
     ranker = ScoringEngine()
 
-    tomorrow = datetime.now() + timedelta(days=1)
+    today = datetime.now()
 
     try:
-        # ─────────────────────────────────────────────
-        # STEP 1: AI discovers the best events for tomorrow's date
-        # No Wikipedia feed — AI decides based on its knowledge
-        # ─────────────────────────────────────────────
-        logger.info(f"🤖 AI discovering events for {tomorrow.strftime('%B %d')}...")
-        raw_events = await processor.discover_events(tomorrow)
-        logger.info(f"📋 AI returned {len(raw_events)} candidate events")
+        # ─────────────────────────────────────────────────────────
+        # STEP 1: AI casts a wide net — 60 events for today's date
+        # ─────────────────────────────────────────────────────────
+        logger.info(f"🌐 PASS 1 — Discovering 60 events for {today.strftime('%B %d')}...")
+        all_events = await processor.discover_events(today)
+        logger.info(f"📋 Got {len(all_events)} validated events from AI")
 
-        if not raw_events:
+        if not all_events:
             logger.error("❌ AI returned no events. Aborting.")
             return
 
-        # ─────────────────────────────────────────────
-        # STEP 2: Enrich top 10 candidates with titles + refined AI scores
-        # ─────────────────────────────────────────────
-        top_candidates = raw_events[:10]
-        ai_data = await processor.batch_score_and_categorize(top_candidates, tomorrow)
-        ai_results = ai_data.get("results", {})
+        # ─────────────────────────────────────────────────────────
+        # STEP 2: AI deep-ranks and selects top 15 globally important
+        # ─────────────────────────────────────────────────────────
+        logger.info("🔬 PASS 2 — Deep ranking: selecting top 15 most globally impactful...")
+        top15 = await processor.deep_rank_and_select(all_events, today)
+        logger.info(f"🏅 Deep rank returned {len(top15)} enriched events")
 
-        # ─────────────────────────────────────────────
-        # STEP 3: Fetch Wikipedia pageviews in parallel (validates real interest)
-        # ─────────────────────────────────────────────
-        view_tasks = [scraper.fetch_page_views(item.get("slug", "")) for item in top_candidates]
+        if not top15:
+            logger.warning("⚠️ Deep rank failed, falling back to raw AI scores")
+            top15 = sorted(all_events, key=lambda x: x.get("ai_score", 0), reverse=True)[:15]
+
+        # ─────────────────────────────────────────────────────────
+        # STEP 3: Fetch Wikipedia pageviews in parallel for top 15
+        # Views act as a real-world validation signal
+        # ─────────────────────────────────────────────────────────
+        logger.info("📊 Fetching Wikipedia pageviews for top 15...")
+        view_tasks = [scraper.fetch_page_views(item.get("slug", "")) for item in top15]
         views = await asyncio.gather(*view_tasks)
 
-        # ─────────────────────────────────────────────
-        # STEP 4: Merge scores and rank
-        # ─────────────────────────────────────────────
-        for idx, item in enumerate(top_candidates):
-            refined = ai_results.get(f"ID_{idx}", {})
+        # ─────────────────────────────────────────────────────────
+        # STEP 4: Calculate final scores and select top 5
+        # ─────────────────────────────────────────────────────────
+        for idx, item in enumerate(top15):
             item["views"] = views[idx] if isinstance(views[idx], int) else 0
-            item["titles"] = refined.get("titles", {lang: "Historical Event" for lang in ["en", "ro", "es", "de", "fr"]})
-
-            # Use refined AI score if available, otherwise fall back to discovery score
-            item["refined_score"] = refined.get("score", item.get("ai_score", 50))
-
             item["final_score"] = ranker.calculate_final_score(
-                ai_score=item["refined_score"],
+                ai_score=item.get("deep_score", item.get("ai_score", 50)),
                 views=item["views"],
                 category=item.get("category", "culture_arts"),
                 year=item.get("year", 0),
             )
 
-        top_candidates.sort(key=lambda x: x.get("final_score", 0), reverse=True)
-        top_5 = top_candidates[:5]
+        top15.sort(key=lambda x: x.get("final_score", 0), reverse=True)
+        top5 = top15[:5]
 
-        logger.info("🏆 Top 5 events selected:")
-        for i, ev in enumerate(top_5):
-            logger.info(f"  {i+1}. [{ev['year']}] {ev['text'][:80]} — score: {ev['final_score']}")
+        logger.info("🏆 FINAL TOP 5:")
+        for i, ev in enumerate(top5):
+            breakdown = ev.get("score_breakdown", {})
+            logger.info(
+                f"  {i+1}. [{ev['year']}] {ev['text'][:80]}\n"
+                f"      → final={ev['final_score']} | deep={ev.get('deep_score','?')} | "
+                f"views={ev['views']} | breakdown={breakdown}"
+            )
 
-        # ─────────────────────────────────────────────
+        # ─────────────────────────────────────────────────────────
         # STEP 5: Generate multilingual narratives for top 5
-        # ─────────────────────────────────────────────
-        narratives_map = await processor.generate_secondary_narratives(top_5, tomorrow)
+        # ─────────────────────────────────────────────────────────
+        logger.info("✍️ Generating multilingual narratives for top 5...")
+        narratives_map = await processor.generate_secondary_narratives(top5, today)
 
-        # ─────────────────────────────────────────────
-        # STEP 6: Fetch & upload images
-        # AI provides the Wikipedia slug → scraper fetches gallery from that article
-        # ─────────────────────────────────────────────
+        # ─────────────────────────────────────────────────────────
+        # STEP 6: Fetch & upload images using AI-provided wiki slugs
+        # ─────────────────────────────────────────────────────────
         final_events_list = []
 
-        for idx, item in enumerate(top_5):
+        for idx, item in enumerate(top5):
             slug = item.get("slug", "")
             year = item.get("year", 0)
             slug_display = slug.replace("_", " ")
 
-            # 6a. Try Pexels for a high-quality hero image
+            logger.info(f"🖼️ Fetching images for: {slug_display}")
+
+            # Hero image from Pexels
             hero_url = await scraper.fetch_pro_image(slug_display)
 
-            # 6b. Fetch up to 3 images from the Wikipedia article the AI specified
+            # Gallery from the exact Wikipedia article AI specified
             wiki_urls = await scraper.fetch_gallery_urls(slug, limit=3)
 
-            # 6c. Merge sources (hero first, then wiki, no duplicates)
+            # Merge: hero first, then wiki, no duplicates, no GIFs
             combined_sources = []
             seen_urls: set = set()
 
@@ -177,7 +181,7 @@ async def main():
                     combined_sources.append(w_url)
                     seen_urls.add(w_url)
 
-            # 6d. Upload to Cloudinary
+            # Upload to Cloudinary
             gallery = []
             for i, url in enumerate(combined_sources):
                 img_url = await safe_upload(scraper, url, f"ev_{year}_{slug[:20]}_{i}")
@@ -185,23 +189,24 @@ async def main():
                     gallery.append(img_url)
                 await asyncio.sleep(0.5)
 
-            # 6e. Fallback: use Wikipedia thumbnail if gallery is empty
+            # Fallback to wiki_thumb if gallery is empty
             if not gallery and item.get("wiki_thumb"):
                 fb = await safe_upload(scraper, item["wiki_thumb"], f"ev_{year}_{slug[:20]}_fb")
                 gallery = [fb] if fb else []
 
-            # ─────────────────────────────────────────────
+            # ─────────────────────────────────────────────────────
             # STEP 7: Assemble EventDetail
-            # ─────────────────────────────────────────────
+            # ─────────────────────────────────────────────────────
             narrative_data = narratives_map.get(f"EVENT_{idx}", {})
+            titles = item.get("titles", {lang: "Historical Event" for lang in ["en", "ro", "es", "de", "fr"]})
 
             final_events_list.append(
                 EventDetail(
                     category=EventCategory(item["category"].lower()),
                     year=year,
-                    event_date=tomorrow.date(),
+                    event_date=today.date(),
                     source_url=f"https://en.wikipedia.org/wiki/{slug}",
-                    title_translations=Translations(**item["titles"]),
+                    title_translations=Translations(**titles),
                     narrative_translations=Translations(**narrative_data),
                     impact_score=float(item["final_score"]),
                     page_views_30d=item["views"],
@@ -209,16 +214,18 @@ async def main():
                 )
             )
 
-        # ─────────────────────────────────────────────
-        # STEP 8: Send payload to Java backend
-        # ─────────────────────────────────────────────
+        # ─────────────────────────────────────────────────────────
+        # STEP 8: Send final payload to Java backend
+        # ─────────────────────────────────────────────────────────
         payload = DailyPayload(
-            date_processed=tomorrow.date(),
+            date_processed=today.date(),
             events=final_events_list,
             metadata={
-                "processed": len(top_candidates),
-                "target_date": str(tomorrow.date()),
-                "pipeline": "ai_driven_v2",
+                "total_discovered": len(all_events),
+                "after_deep_rank": len(top15),
+                "final_selected": len(final_events_list),
+                "target_date": str(today.date()),
+                "pipeline": "ai_driven_60_to_5_v3",
             },
         )
 
