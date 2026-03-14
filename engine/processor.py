@@ -9,7 +9,7 @@ from schema.models import EventCategory
 class AIProcessor:
     def __init__(self, model: str = config.AI_MODEL):
         self.client = Groq(api_key=config.GROQ_API_KEY)
-        self.model = model
+        self.model = model  # "moonshotai/kimi-k2-instruct-0905"
         self.categories_list = [c.value for c in EventCategory]
         self.languages = ["en", "ro", "es", "de", "fr"]
 
@@ -22,13 +22,7 @@ class AIProcessor:
         return {lang: data.get(lang) or fallback_text for lang in self.languages}
 
     async def discover_events(self, target_date: datetime) -> list:
-        """
-        AI decides completely which historical events happened on this date.
-        Returns a list of structured events with wiki slugs for image fetching.
-        No Wikipedia feed — pure AI knowledge.
-        """
         date_str = self._get_target_date_str(target_date)
-
         prompt = f"""
         Today is {date_str}. List the 15 most historically significant events that occurred on {date_str} throughout history.
 
@@ -58,11 +52,9 @@ class AIProcessor:
         - Order events by ai_score descending
         - Return exactly 15 events
         """
-
         res = await self._safe_groq_call(prompt, "Event Discovery", {"events": []})
         events = res.get("events", [])
 
-        # Validate and sanitize
         validated = []
         for e in events:
             if not isinstance(e.get("year"), int):
@@ -73,19 +65,13 @@ class AIProcessor:
                 e["category"] = EventCategory.CULTURE_ARTS.value
             e["ai_score"] = max(0, min(100, int(e.get("ai_score", 50))))
             validated.append(e)
-
         return validated
 
     async def batch_score_and_categorize(self, candidates: list, target_date: datetime):
-        """
-        Re-score and enrich AI-discovered events.
-        Since AI already provided scores, this pass adds multilingual titles.
-        """
         date_str = self._get_target_date_str(target_date)
         candidates_text = "\n".join(
             [f"ID_{i}: ({item['year']}) {item['text'][:250]}" for i, item in enumerate(candidates)]
         )
-
         prompt = f"""
         DATE: {date_str}
         These historical events occurred on {date_str}. For each, provide:
@@ -107,18 +93,14 @@ class AIProcessor:
         EVENTS:
         {candidates_text}
         """
-
         res = await self._safe_groq_call(prompt, "Batch Scoring", {"results": {}})
         results = res.get("results", {})
-
         for vid, data in results.items():
             data["titles"] = self._ensure_langs(data.get("titles", {}), "Historical Event")
             data["score"] = max(0, min(100, int(data.get("score", 50))))
-
         return {"results": results}
 
     async def generate_secondary_narratives(self, top_events: list, target_date: datetime):
-        """Generate short narratives for all top events in all 5 languages."""
         date_str = self._get_target_date_str(target_date)
 
         async def process_single(idx, item):
@@ -159,13 +141,16 @@ class AIProcessor:
                             "You are a strict History API. "
                             "Output ONLY valid JSON matching the exact schema requested. "
                             "No markdown, no preamble, no extra keys."
-                        )
+                        ),
                     },
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": prompt},
                 ],
                 response_format={"type": "json_object"},
-                temperature=0.1,
-                max_tokens=4096
+                temperature=0.6,
+                max_completion_tokens=4096,
+                top_p=1,
+                stream=False,
+                stop=None,
             )
             return json.loads(completion.choices[0].message.content)
         except Exception as e:

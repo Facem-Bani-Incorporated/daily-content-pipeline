@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     # Core
     WIKI_BASE_URL: str = "https://en.wikipedia.org/api/rest_v1"
     USER_AGENT: str = "DailyHistoryApp/2.0 (contact@yourdomain.com)"
-    AI_MODEL: str = "llama-3.3-70b-versatile"
+    AI_MODEL: str = "moonshotai/kimi-k2-instruct-0905"
 
     # API Keys
     GROQ_API_KEY: str
