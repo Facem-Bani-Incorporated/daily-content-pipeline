@@ -12,34 +12,91 @@ class AIProcessor:
         self.model = model
         self.categories_list = [c.value for c in EventCategory]
         self.languages = ["en", "ro", "es", "de", "fr"]
-        self.today_str = datetime.now().strftime("%d %B")
+
+    def _get_target_date_str(self, target_date: datetime) -> str:
+        return target_date.strftime("%B %d")
 
     def _ensure_langs(self, data: dict, fallback_text: str = "Title pending") -> dict:
-        """
-        DEFENSIVE PROGRAMMING: Garantează că toate cele 5 chei există.
-        Dacă AI-ul uită 'fr', această funcție o va adăuga automat pentru a nu crăpa Pydantic-ul.
-        """
         if not isinstance(data, dict):
             data = {}
         return {lang: data.get(lang) or fallback_text for lang in self.languages}
 
-    async def batch_score_and_categorize(self, candidates: list):
-        """Primul pas: Filtrare și clasificare rapidă cu schemă strictă."""
-        candidates_text = "\n".join(
-            [f"ID_{i}: ({item['year']}) {item['text'][:250]}" for i, item in enumerate(candidates)])
+    async def discover_events(self, target_date: datetime) -> list:
+        """
+        AI decides completely which historical events happened on this date.
+        Returns a list of structured events with wiki slugs for image fetching.
+        No Wikipedia feed — pure AI knowledge.
+        """
+        date_str = self._get_target_date_str(target_date)
 
         prompt = f"""
-        TODAY IS: {self.today_str}.
-        Analyze these historical events occurred specifically on {self.today_str}.
+        Today is {date_str}. List the 15 most historically significant events that occurred on {date_str} throughout history.
 
-        ALLOWED CATEGORIES: {self.categories_list}
+        Selection criteria (in order of priority):
+        1. Global impact — changed the world, affected millions of people
+        2. Memorability — events people know and care about
+        3. Diversity — mix of categories: science, politics, culture, war, exploration, technology
+        4. Verifiability — events with a clear Wikipedia article
 
-        STRICT JSON SCHEMA REQUIRED:
+        STRICT JSON SCHEMA — return ONLY this, no extra text:
+        {{
+          "events": [
+            {{
+              "year": 1969,
+              "text": "One sentence description of what happened.",
+              "slug": "Apollo_11",
+              "category": "science_technology",
+              "ai_score": 92
+            }}
+          ]
+        }}
+
+        RULES:
+        - "slug" must be the exact Wikipedia article title (use underscores, e.g. "French_Revolution")
+        - "category" must be one of: {self.categories_list}
+        - "ai_score" is your 0-100 confidence that this event is historically significant and engaging
+        - Order events by ai_score descending
+        - Return exactly 15 events
+        """
+
+        res = await self._safe_groq_call(prompt, "Event Discovery", {"events": []})
+        events = res.get("events", [])
+
+        # Validate and sanitize
+        validated = []
+        for e in events:
+            if not isinstance(e.get("year"), int):
+                continue
+            if not e.get("text") or not e.get("slug"):
+                continue
+            if e.get("category") not in self.categories_list:
+                e["category"] = EventCategory.CULTURE_ARTS.value
+            e["ai_score"] = max(0, min(100, int(e.get("ai_score", 50))))
+            validated.append(e)
+
+        return validated
+
+    async def batch_score_and_categorize(self, candidates: list, target_date: datetime):
+        """
+        Re-score and enrich AI-discovered events.
+        Since AI already provided scores, this pass adds multilingual titles.
+        """
+        date_str = self._get_target_date_str(target_date)
+        candidates_text = "\n".join(
+            [f"ID_{i}: ({item['year']}) {item['text'][:250]}" for i, item in enumerate(candidates)]
+        )
+
+        prompt = f"""
+        DATE: {date_str}
+        These historical events occurred on {date_str}. For each, provide:
+        1. A refined impact score (0-100) based on historical significance and modern relevance
+        2. Engaging multilingual titles (short, punchy, under 10 words each)
+
+        STRICT JSON SCHEMA:
         {{
           "results": {{
             "ID_0": {{
-              "category": "one_from_allowed_list",
-              "score": 85,
+              "score": 88,
               "titles": {{
                 "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..."
               }}
@@ -47,98 +104,68 @@ class AIProcessor:
           }}
         }}
 
-        INPUT: {candidates_text}
+        EVENTS:
+        {candidates_text}
         """
-        res = await self._safe_groq_call(prompt, "Batch Analysis", {"results": {}})
 
-        # Validare Post-Procesare
-        results = res.get('results', {})
+        res = await self._safe_groq_call(prompt, "Batch Scoring", {"results": {}})
+        results = res.get("results", {})
+
         for vid, data in results.items():
-            # 1. Reparăm categoria dacă a halucinat-o
-            if data.get('category') not in self.categories_list:
-                data['category'] = EventCategory.CULTURE_ARTS.value
-            # 2. Reparăm titlurile dacă a uitat o limbă
-            data['titles'] = self._ensure_langs(data.get('titles', {}), "Historical Event")
+            data["titles"] = self._ensure_langs(data.get("titles", {}), "Historical Event")
+            data["score"] = max(0, min(100, int(data.get("score", 50))))
 
         return {"results": results}
 
-    async def generate_multilingual_main_event(self, event_data: dict):
-        """Generare narațiune și titluri finale pentru evenimentul principal."""
-        event_info = f"Year: {event_data.get('year')} | Event: {event_data.get('text')}"
+    async def generate_secondary_narratives(self, top_events: list, target_date: datetime):
+        """Generate short narratives for all top events in all 5 languages."""
+        date_str = self._get_target_date_str(target_date)
 
-        # Pas 1: Titluri
-        titles_prompt = f"""
-        Create 5 highly engaging historical titles for: {event_info}.
-        STRICT JSON SCHEMA:
-        {{
-            "titles": {{
-                "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..."
-            }}
-        }}
-        """
-        titles_res = await self._safe_groq_call(titles_prompt, "Main Titles", {"titles": {}})
-        # Asigurăm prezența tuturor limbilor
-        safe_titles = self._ensure_langs(titles_res.get('titles', {}), "Major Historical Event")
-
-        # Pas 2: Narațiuni paralele
-        async def fetch_lang_narrative(lang):
-            prompt = f"""
-            TODAY IN HISTORY: {self.today_str}. EVENT: {event_info}.
-
-            TASK: Write a 400-word historical narrative in {lang.upper()}.
-            STRICT RULES:
-            1. The event MUST be presented as occurring on {self.today_str}, {event_data.get('year')}.
-            2. DO NOT mention dates from other months as the primary date.
-            3. Return ONLY JSON: {{ "content": "narrative text here" }}
-            """
-            res = await self._safe_groq_call(prompt, f"Main {lang}", {"content": "Data pending generation."})
-            return lang, res.get("content", "Data pending generation.")
-
-        tasks = [fetch_lang_narrative(l) for l in self.languages]
-        narrative_results = await asyncio.gather(*tasks)
-
-        return {
-            "titles": safe_titles,
-            "narratives": dict(narrative_results)
-        }
-
-    async def generate_secondary_narratives(self, secondary_candidates: list):
-        """Generare narațiuni scurte pentru evenimentele secundare."""
-
-        async def process_single_secondary(idx, item):
-            event_tasks = [self._fetch_secondary_lang(idx, item, lang) for lang in self.languages]
+        async def process_single(idx, item):
+            event_tasks = [
+                self._fetch_secondary_lang(idx, item, lang, date_str)
+                for lang in self.languages
+            ]
             lang_results = await asyncio.gather(*event_tasks)
             return f"EVENT_{idx}", dict(lang_results)
 
-        main_tasks = [process_single_secondary(i, item) for i, item in enumerate(secondary_candidates)]
-        final_results = await asyncio.gather(*main_tasks)
-
+        tasks = [process_single(i, item) for i, item in enumerate(top_events)]
+        final_results = await asyncio.gather(*tasks)
         return dict(final_results)
 
-    async def _fetch_secondary_lang(self, idx, item, lang):
-        event_info = f"{item['year']} - {item['text'][:300]}"
+    async def _fetch_secondary_lang(self, idx, item, lang, date_str):
+        event_info = f"{item['year']} — {item['text'][:300]}"
         prompt = f"""
-        DATE: {self.today_str}.
-        SUMMARY (200 words) in {lang.upper()} for: {event_info}.
-        STRICT: Focus only on what happened on {self.today_str}.
-        JSON SCHEMA: {{ "content": "summary text here" }}
+        DATE IN HISTORY: {date_str}, {item['year']}.
+        Write a 200-word engaging summary in {lang.upper()} about: {event_info}.
+
+        RULES:
+        - Present the event as occurring on {date_str}
+        - Use vivid, journalistic language
+        - Focus on why this matters today
+        - Return ONLY JSON: {{ "content": "narrative text here" }}
         """
-        res = await self._safe_groq_call(prompt, f"Sec {idx} {lang}", {"content": "Historical data pending."})
+        res = await self._safe_groq_call(prompt, f"Narrative {idx} {lang}", {"content": "Historical data pending."})
         return lang, res.get("content", "Historical data pending.")
 
-    async def _safe_groq_call(self, prompt, context, fallback):
-        """Nucleul de apelare securizată către LLM."""
+    async def _safe_groq_call(self, prompt: str, context: str, fallback: dict) -> dict:
         try:
-            system_msg = f"You are a strict History API. Today is {self.today_str}. Output exactly the JSON schema requested, nothing else."
-
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": system_msg},
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a strict History API. "
+                            "Output ONLY valid JSON matching the exact schema requested. "
+                            "No markdown, no preamble, no extra keys."
+                        )
+                    },
                     {"role": "user", "content": prompt}
                 ],
                 response_format={"type": "json_object"},
-                temperature=0.0  # Complet determinist
+                temperature=0.1,
+                max_tokens=4096
             )
             return json.loads(completion.choices[0].message.content)
         except Exception as e:
