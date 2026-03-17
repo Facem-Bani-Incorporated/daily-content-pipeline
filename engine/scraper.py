@@ -1,25 +1,26 @@
 import httpx
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict
 import asyncio
-
-from core.config import config
 from core.logger import setup_logger
 
 logger = setup_logger("EliteScraper")
 
 class SmartWikiScraper:
     def __init__(self):
-        self.headers = {"User-Agent": f"HistoryApp/1.0 ({config.CONTACT_EMAIL})"}
+        # Un User-Agent generic, curat, care respectă politicile Wiki, fără variabile externe
+        self.headers = {"User-Agent": "EliteHistoryBot/1.0 (Educational API)"}
+        
+        # O listă neagră agresivă pentru a elimina gunoiul (nașteri obscure, orașe, etc.)
         self.blacklist_terms = [
             "country", "republic", "state", "continent", "capital city", 
             "administrative", "municipality", "census-designated", "village",
-            "province", "territory", "region", "district"
+            "province", "territory", "region", "district", "footballer", 
+            "cricketer", "baseball player", "politician from"
         ]
 
     async def fetch_page_views(self, slug: str) -> int:
-        """Calculăm popularitatea reală pe ultimele 30 de zile."""
-        from datetime import timedelta
+        """Trage vizualizările reale pe ultimele 30 de zile pentru a calcula popularitatea."""
         today_str = datetime.now().strftime("%Y%m%d")
         last_month_str = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
         
@@ -32,23 +33,16 @@ class SmartWikiScraper:
                 if res.status_code == 200:
                     data = res.json()
                     return sum(item["views"] for item in data.get("items", []))
-            except:
+            except Exception:
                 return 0
         return 0
 
     async def get_today_elite_events(self) -> List[Dict]:
-        """
-        Extrage DOAR evenimente istorice importante din EXACT ziua de azi
-        (aceeași lună și zi, dar din anii trecuți).
-        """
+        """Extrage DOAR evenimentele istorice premium pentru exact ziua de azi."""
         now = datetime.now()
-        current_month = now.month
-        current_day = now.day
+        logger.info(f"🗓️ Căutăm evenimente de top pentru: {now.day:02d}/{now.month:02d}")
         
-        # Confirmăm în log ce dată procesăm
-        logger.info(f"🗓️ Fetching historical events for: {current_day:02d}/{current_month:02d}")
-        
-        url = f"https://en.wikipedia.org/api/rest_v1/feed/onthisday/all/{current_month:02d}/{current_day:02d}"
+        url = f"https://en.wikipedia.org/api/rest_v1/feed/onthisday/all/{now.month:02d}/{now.day:02d}"
 
         async with httpx.AsyncClient(headers=self.headers, timeout=20.0) as client:
             try:
@@ -56,67 +50,51 @@ class SmartWikiScraper:
                 res.raise_for_status()
                 data = res.json()
 
-                # Folosim DOAR 'selected' - evenimente curate manual
+                # Prioritate MAXIMĂ: secțiunea "selected" (curatoriată de oameni)
                 raw_list = data.get("selected", [])
                 
-                # Dacă nu avem suficiente, completăm cu 'events'
-                if len(raw_list) < 15:
-                    additional_events = data.get("events", [])[:20]
-                    raw_list.extend(additional_events)
+                # Dacă sunt prea puține, completăm cu evenimente standard, dar le vom penaliza la scor
+                if len(raw_list) < 10:
+                    raw_list.extend(data.get("events", [])[:15])
 
                 clean_events = []
-                seen_texts = set()  # Evităm duplicate
+                seen_texts = set()
                 
                 for ev in raw_list:
-                    # VALIDARE 1: Trebuie să aibă an și text
                     year = ev.get("year")
                     text = ev.get("text", "").strip()
-                    
-                    if not year or not text:
-                        continue
-                    
-                    # VALIDARE 2: Evităm duplicate
-                    if text in seen_texts:
-                        continue
-                    seen_texts.add(text)
-                    
-                    # VALIDARE 3: Trebuie să aibă cel puțin o pagină Wikipedia asociată
                     pages = ev.get("pages", [])
-                    if not pages:
-                        continue
                     
+                    if not year or not text or not pages or text in seen_texts:
+                        continue
+                        
+                    seen_texts.add(text)
                     main_page = pages[0]
                     slug = main_page.get("titles", {}).get("canonical", "")
                     description = main_page.get("description", "").lower()
                     extract = main_page.get("extract", "")
                     
-                    # VALIDARE 4: Slug valid
-                    if not slug:
+                    # Filtru de Elită: Eliminăm non-subiecte și articole prea scurte
+                    if not slug or len(extract) < 80:
                         continue
-                    
-                    # FILTRU ELITĂ: Eliminăm articole administrative
                     if any(term in description for term in self.blacklist_terms):
                         continue
                     
-                    # VALIDARE 5: Evenimentul trebuie să aibă substanță
-                    if len(extract) < 50:  # Prea scurt = probabil stub
-                        continue
-                    
-                    # Construim eveniment validat
                     clean_events.append({
                         "year": int(year),
                         "text": text,
                         "slug": slug,
-                        "description": main_page.get("description", ""),
-                        "extract": extract[:500],  # Primele 500 caractere
+                        "description": description,
+                        "extract": extract[:600],
                         "thumbnail": main_page.get("thumbnail", {}).get("source") if main_page.get("thumbnail") else None,
-                        "month": current_month,
-                        "day": current_day
+                        "month": now.month,
+                        "day": now.day,
+                        "is_selected": ev in data.get("selected", []) # Flag pentru bonus la scor
                     })
                 
-                logger.info(f"✅ Found {len(clean_events)} valid events for {current_day:02d}/{current_month:02d}")
+                logger.info(f"✅ Găsite {len(clean_events)} evenimente valide.")
                 return clean_events
 
             except Exception as e:
-                logger.error(f"❌ Scraper failed: {e}")
+                logger.error(f"❌ Scraperul a picat: {e}")
                 return []
