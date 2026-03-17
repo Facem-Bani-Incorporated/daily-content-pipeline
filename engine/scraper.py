@@ -11,10 +11,10 @@ logger = setup_logger("EliteScraper")
 class SmartWikiScraper:
     def __init__(self):
         self.headers = {"User-Agent": f"HistoryApp/1.0 ({config.CONTACT_EMAIL})"}
-        # Cuvinte care semnalează un articol plictisitor/administrativ
         self.blacklist_terms = [
             "country", "republic", "state", "continent", "capital city", 
-            "administrative", "municipality", "census-designated", "village"
+            "administrative", "municipality", "census-designated", "village",
+            "province", "territory", "region", "district"
         ]
 
     async def fetch_page_views(self, slug: str) -> int:
@@ -38,12 +38,17 @@ class SmartWikiScraper:
 
     async def get_today_elite_events(self) -> List[Dict]:
         """
-        Punctul cheie: Folosim endpoint-ul 'selected' care conține DOAR 
-        evenimente verificate manual de editorii Wikipedia ca fiind importante.
+        Extrage DOAR evenimente istorice importante din EXACT ziua de azi
+        (aceeași lună și zi, dar din anii trecuți).
         """
         now = datetime.now()
-        # Endpoint-ul 'all' ne dă 'selected', 'events', 'births', 'deaths'
-        url = f"https://en.wikipedia.org/api/rest_v1/feed/onthisday/all/{now.month:02d}/{now.day:02d}"
+        current_month = now.month
+        current_day = now.day
+        
+        # Confirmăm în log ce dată procesăm
+        logger.info(f"🗓️ Fetching historical events for: {current_day:02d}/{current_month:02d}")
+        
+        url = f"https://en.wikipedia.org/api/rest_v1/feed/onthisday/all/{current_month:02d}/{current_day:02d}"
 
         async with httpx.AsyncClient(headers=self.headers, timeout=20.0) as client:
             try:
@@ -51,36 +56,65 @@ class SmartWikiScraper:
                 res.raise_for_status()
                 data = res.json()
 
-                # PRIORITATE 1: Evenimentele 'selected' (curate de oameni)
-                # PRIORITATE 2: Evenimentele 'events' (brute, dacă 'selected' e prea scurt)
+                # Folosim DOAR 'selected' - evenimente curate manual
                 raw_list = data.get("selected", [])
-                if len(raw_list) < 10:
-                    raw_list += data.get("events", [])
+                
+                # Dacă nu avem suficiente, completăm cu 'events'
+                if len(raw_list) < 15:
+                    additional_events = data.get("events", [])[:20]
+                    raw_list.extend(additional_events)
 
                 clean_events = []
+                seen_texts = set()  # Evităm duplicate
+                
                 for ev in raw_list:
+                    # VALIDARE 1: Trebuie să aibă an și text
+                    year = ev.get("year")
+                    text = ev.get("text", "").strip()
+                    
+                    if not year or not text:
+                        continue
+                    
+                    # VALIDARE 2: Evităm duplicate
+                    if text in seen_texts:
+                        continue
+                    seen_texts.add(text)
+                    
+                    # VALIDARE 3: Trebuie să aibă cel puțin o pagină Wikipedia asociată
                     pages = ev.get("pages", [])
-                    if not pages: continue
+                    if not pages:
+                        continue
                     
                     main_page = pages[0]
+                    slug = main_page.get("titles", {}).get("canonical", "")
                     description = main_page.get("description", "").lower()
+                    extract = main_page.get("extract", "")
                     
-                    # FILTRU DE ELITĂ: Eliminăm "gunoiul" administrativ
+                    # VALIDARE 4: Slug valid
+                    if not slug:
+                        continue
+                    
+                    # FILTRU ELITĂ: Eliminăm articole administrative
                     if any(term in description for term in self.blacklist_terms):
                         continue
-
-                    # Eliminăm evenimentele fără an sau text
-                    if not ev.get("year") or not ev.get("text"):
+                    
+                    # VALIDARE 5: Evenimentul trebuie să aibă substanță
+                    if len(extract) < 50:  # Prea scurt = probabil stub
                         continue
-
+                    
+                    # Construim eveniment validat
                     clean_events.append({
-                        "year": ev["year"],
-                        "text": ev["text"],
-                        "slug": main_page.get("titles", {}).get("canonical"),
-                        "description": description,
-                        "thumbnail": main_page.get("thumbnail", {}).get("source") if main_page.get("thumbnail") else None
+                        "year": int(year),
+                        "text": text,
+                        "slug": slug,
+                        "description": main_page.get("description", ""),
+                        "extract": extract[:500],  # Primele 500 caractere
+                        "thumbnail": main_page.get("thumbnail", {}).get("source") if main_page.get("thumbnail") else None,
+                        "month": current_month,
+                        "day": current_day
                     })
-
+                
+                logger.info(f"✅ Found {len(clean_events)} valid events for {current_day:02d}/{current_month:02d}")
                 return clean_events
 
             except Exception as e:

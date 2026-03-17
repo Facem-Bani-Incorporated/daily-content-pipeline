@@ -88,55 +88,92 @@ async def main():
     logger.info("🚀 Starting Elite History Pipeline")
 
     scraper = SmartWikiScraper()
-    processor = AIProcessor() # Motorul de rescriere și traducere
+    processor = AIProcessor()
     today = datetime.now()
+    
+    # Log explicit pentru debugging
+    logger.info(f"📅 Processing date: {today.strftime('%Y-%m-%d')}")
+    logger.info(f"📍 Looking for events from: {today.strftime('%B %d')} (in history)")
 
     try:
-        # STEP 1: Extragem evenimentele verificate (SELECTED)
-        # Noul scraper elimină deja țările/orașele prin blacklist
+        # STEP 1: Extragem evenimentele din EXACT ziua de azi (dar din istorie)
         candidates = await scraper.get_today_elite_events()
+        
         if not candidates:
-            logger.error("❌ No elite events found today")
+            logger.error(f"❌ No events found for {today.strftime('%B %d')}")
             return
+        
+        # Validare suplimentară: confirmăm că toate au luna/ziua corectă
+        validated_candidates = []
+        for c in candidates:
+            if c["month"] == today.month and c["day"] == today.day:
+                validated_candidates.append(c)
+            else:
+                logger.warning(f"⚠️ Skipping event with wrong date: {c['text']}")
+        
+        candidates = validated_candidates
+        logger.info(f"✅ Validated {len(candidates)} events for today")
 
-        # STEP 2: Calculăm Popularitatea (PageViews) în paralel
-        logger.info(f"📊 Analyzing popularity for {len(candidates)} candidates...")
+        # STEP 2: Calculăm popularitatea
+        logger.info(f"📊 Analyzing popularity...")
         view_tasks = [scraper.fetch_page_views(c["slug"]) for c in candidates]
         views_results = await asyncio.gather(*view_tasks)
 
         for i, count in enumerate(views_results):
             candidates[i]["views"] = count
 
-        # STEP 3: Scoring Matematic (Importanță Istorică + Popularitate Actuală)
+        # STEP 3: Scoring avansat
         for c in candidates:
-            # Bonus pentru epoca modernă (mai mult conținut media disponibil)
-            recency_bonus = 25 if c["year"] > 1800 else 0
-            # Formula logaritmică: echilibrează evenimentele virale cu cele de nișă
-            c["final_score"] = (math.log10(c["views"] + 1) * 12) + recency_bonus
+            year = c["year"]
+            views = c["views"]
+            
+            # Penalizare pentru evenimente prea vechi (pre-1500)
+            if year < 1500:
+                age_penalty = -10
+            else:
+                age_penalty = 0
+            
+            # Bonus pentru evenimente moderne cu media disponibilă
+            if year > 1900:
+                recency_bonus = 20
+            elif year > 1800:
+                recency_bonus = 10
+            else:
+                recency_bonus = 0
+            
+            # Scor bazat pe popularitate + bonusuri
+            c["final_score"] = (math.log10(views + 1) * 15) + recency_bonus + age_penalty
+            
+            # Log pentru debugging
+            logger.debug(f"Event: {year} - {c['slug'][:30]} | Views: {views} | Score: {c['final_score']:.2f}")
 
-        # Sortăm și luăm cele mai bune 5
+        # Sortăm și luăm top 5
         candidates.sort(key=lambda x: x["final_score"], reverse=True)
         top5 = candidates[:5]
+        
+        logger.info("🏆 Top 5 events selected:")
+        for i, ev in enumerate(top5, 1):
+            logger.info(f"  {i}. [{ev['year']}] {ev['text'][:60]}... (score: {ev['final_score']:.2f})")
 
-        # STEP 4: Procesare AI (Narațiune, Categorisire, Traducere)
+        # STEP 4: Procesare AI
         final_events = []
         for ev in top5:
-            logger.info(f"✍️ AI Polishing: {ev['slug']} ({ev['year']})")
+            logger.info(f"✍️ Processing: {ev['slug']} ({ev['year']})")
             
-            # AI-ul transformă textul sec de pe Wiki în poveste
-            # Și returnează categorisirea corectă (WAR, SCIENCE, etc.)
-            ai_data = await processor.polish_event(ev) 
-
-            # Imagini HQ (Cloudinary)
-            # Prioritizăm imaginea mare de la Wiki dacă există
-            hq_image = ev.get("thumbnail") 
+            ai_data = await processor.polish_event(ev)
+            
+            # Upload imagine
+            hq_image = ev.get("thumbnail")
             cloud_url = await safe_upload(scraper, hq_image, f"ev_{ev['year']}_{ev['slug']}")
-
+            
+            # Construim event-ul final cu data ISTORICĂ corectă
+            historical_date = datetime(ev['year'], ev['month'], ev['day']).date()
+            
             final_events.append(
                 EventDetail(
-                    category=ai_data["category"], 
+                    category=ai_data["category"],
                     year=ev["year"],
-                    event_date=today.date(),
+                    event_date=historical_date,  # Data când s-a întâmplat în istorie
                     source_url=f"https://en.wikipedia.org/wiki/{ev['slug']}",
                     title_translations=ai_data["titles"],
                     narrative_translations=ai_data["narratives"],
@@ -146,15 +183,20 @@ async def main():
                 )
             )
 
-        # STEP 5: Trimitere către Backend
+        # STEP 5: Trimitere
         payload = DailyPayload(
-            date_processed=today.date(),
+            date_processed=today.date(),  # Când am procesat noi
             events=final_events,
-            metadata={"source": "wiki_elite_selection", "version": "2.0"}
+            metadata={
+                "source": "wiki_on_this_day",
+                "version": "2.1",
+                "historical_date": f"{today.strftime('%B %d')}",
+                "events_count": len(final_events)
+            }
         )
 
         await send_to_java(payload)
-        logger.info("🏁 Pipeline completed successfully!")
+        logger.info("🏁 Pipeline completed!")
 
     except Exception as e:
         logger.error(f"🚨 Pipeline crash: {e}", exc_info=True)
