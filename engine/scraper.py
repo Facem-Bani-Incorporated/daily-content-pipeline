@@ -1,215 +1,134 @@
-import asyncio
-import json
-from datetime import datetime
-from groq import Groq
+import httpx
+import cloudinary
+import cloudinary.uploader
+from typing import Optional, List
 from core.config import config
-from schema.models import EventCategory
+from core.logger import setup_logger
+
+logger = setup_logger("Scraper")
 
 
-class AIProcessor:
-    def __init__(self, model: str = config.AI_MODEL):
-        self.client = Groq(api_key=config.GROQ_API_KEY)
-        self.model = model  # "moonshotai/kimi-k2-instruct-0905"
-        self.categories_list = [c.value for c in EventCategory]
-        self.languages = ["en", "ro", "es", "de", "fr"]
+class WikiScraper:
+    def __init__(self):
+        self.headers = {"User-Agent": config.USER_AGENT}
+        self.pexels_key = getattr(config, "PEXELS_API_KEY", None)
 
-    def _get_target_date_str(self, target_date: datetime) -> str:
-        return target_date.strftime("%B %d")
-
-    def _ensure_langs(self, data: dict, fallback_text: str = "Title pending") -> dict:
-        if not isinstance(data, dict):
-            data = {}
-        return {lang: data.get(lang) or fallback_text for lang in self.languages}
-
-    async def discover_events(self, target_date: datetime) -> list:
-        """
-        PASS 1 — Cast a wide net: AI returns 60 historical events for this date.
-        No filtering yet — we want breadth across all eras and categories.
-        """
-        date_str = self._get_target_date_str(target_date)
-
-        prompt = f"""
-        You are a world-class historian. List exactly 60 historical events that occurred on {date_str} throughout all of recorded history.
-
-        Cast the widest possible net:
-        - Ancient history through modern times
-        - All continents and civilizations
-        - All domains: science, war, politics, exploration, culture, technology, religion, economics, natural disasters, sports milestones
-        - Include both famous AND lesser-known but genuinely important events
-
-        STRICT JSON SCHEMA — return ONLY this:
-        {{
-          "events": [
-            {{
-              "year": 1945,
-              "text": "One clear sentence describing exactly what happened.",
-              "slug": "Exact_Wikipedia_Article_Title",
-              "category": "one_from_allowed_list",
-              "ai_score": 75
-            }}
-          ]
-        }}
-
-        RULES:
-        - "slug" = exact Wikipedia article title with underscores (e.g. "World_War_II", "Marie_Curie")
-        - "category" must be one of: {self.categories_list}
-        - "ai_score" = raw historical significance 0-100 (do NOT overthink this yet, just a first pass)
-        - Return EXACTLY 60 events, no more, no less
-        - NO duplicates
-        """
-
-        res = await self._safe_groq_call(prompt, "Event Discovery (60)", {"events": []})
-        events = res.get("events", [])
-
-        validated = []
-        for e in events:
-            if not isinstance(e.get("year"), int):
-                continue
-            if not e.get("text") or not e.get("slug"):
-                continue
-            if e.get("category") not in self.categories_list:
-                e["category"] = EventCategory.CULTURE_ARTS.value
-            e["ai_score"] = max(0, min(100, int(e.get("ai_score", 50))))
-            validated.append(e)
-
-        return validated
-
-    async def deep_rank_and_select(self, candidates: list, target_date: datetime) -> list:
-        """
-        PASS 2 — Deep ranking: from 60 candidates, AI picks the 15 most globally important.
-
-        Scoring criteria:
-        - How many humans were affected (directly or indirectly)?
-        - Did it change the course of history permanently?
-        - Would someone from ANY country, culture, or background recognize this?
-        - Does it have emotional resonance? (awe, fear, pride, curiosity)
-        - Is it a "first ever" or "end of an era" moment?
-        """
-        date_str = self._get_target_date_str(target_date)
-        candidates_text = "\n".join(
-            [f"ID_{i}: ({e['year']}) {e['text'][:200]}" for i, e in enumerate(candidates)]
+        cloudinary.config(
+            cloud_name=config.CLOUDINARY_CLOUD_NAME,
+            api_key=config.CLOUDINARY_API_KEY,
+            api_secret=config.CLOUDINARY_API_SECRET
         )
 
-        prompt = f"""
-        You are ranking historical events for a global "Today in History" app used by people from every country.
-        DATE: {date_str}
+    async def fetch_page_views(self, title_slug: str) -> int:
+        """Fetch 30-day Wikipedia page views for a given article slug."""
+        if not title_slug:
+            return 0
 
-        From the list below, select and deeply score the 15 MOST GLOBALLY IMPACTFUL events.
+        from datetime import datetime, timedelta
+        yesterday = datetime.now() - timedelta(days=1)
+        start = (yesterday - timedelta(days=30)).strftime("%Y%m%d")
+        end = yesterday.strftime("%Y%m%d")
+        slug_clean = title_slug.replace(" ", "_")
 
-        SCORING CRITERIA (apply all, no exceptions):
-        1. GLOBAL REACH (0-30 pts): How many humans on Earth were affected? Billions > Millions > Thousands
-        2. PERMANENCE (0-25 pts): Did this permanently alter the course of human history?
-        3. UNIVERSAL RECOGNITION (0-20 pts): Would a person from Brazil, Japan, Nigeria, and Germany all know this?
-        4. EMOTIONAL POWER (0-15 pts): Does it inspire awe, shock, pride, or wonder in any human?
-        5. UNIQUENESS (0-10 pts): Was this a "first ever", "last ever", or "only time in history"?
-
-        STRICT JSON SCHEMA:
-        {{
-          "top15": [
-            {{
-              "original_id": "ID_7",
-              "deep_score": 94,
-              "score_breakdown": {{
-                "global_reach": 28,
-                "permanence": 24,
-                "universal_recognition": 19,
-                "emotional_power": 14,
-                "uniqueness": 9
-              }},
-              "titles": {{
-                "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..."
-              }}
-            }}
-          ]
-        }}
-
-        RULES:
-        - Select EXACTLY 15 events from the list
-        - Order by deep_score descending
-        - Titles must be punchy, emotional, under 10 words each
-        - Prefer events that would make someone stop scrolling and think "wow, this happened TODAY in history?"
-
-        CANDIDATES:
-        {candidates_text}
-        """
-
-        res = await self._safe_groq_call(prompt, "Deep Rank (15 from 60)", {"top15": []})
-        top15_raw = res.get("top15", [])
-
-        # Map back to original candidate data + enrich with deep scores
-        id_to_candidate = {f"ID_{i}": e for i, e in enumerate(candidates)}
-        enriched = []
-
-        for entry in top15_raw:
-            original_id = entry.get("original_id", "")
-            candidate = id_to_candidate.get(original_id)
-            if not candidate:
-                continue
-
-            breakdown = entry.get("score_breakdown", {})
-            candidate["deep_score"] = max(0, min(100, int(entry.get("deep_score", 50))))
-            candidate["score_breakdown"] = breakdown
-            candidate["titles"] = self._ensure_langs(entry.get("titles", {}), "Historical Event")
-            enriched.append(candidate)
-
-        return enriched
-
-    async def generate_secondary_narratives(self, top_events: list, target_date: datetime):
-        """Generate short narratives for top 5 events in all 5 languages."""
-        date_str = self._get_target_date_str(target_date)
-
-        async def process_single(idx, item):
-            event_tasks = [
-                self._fetch_secondary_lang(idx, item, lang, date_str)
-                for lang in self.languages
-            ]
-            lang_results = await asyncio.gather(*event_tasks)
-            return f"EVENT_{idx}", dict(lang_results)
-
-        tasks = [process_single(i, item) for i, item in enumerate(top_events)]
-        final_results = await asyncio.gather(*tasks)
-        return dict(final_results)
-
-    async def _fetch_secondary_lang(self, idx, item, lang, date_str):
-        event_info = f"{item['year']} — {item['text'][:300]}"
-        prompt = f"""
-        DATE IN HISTORY: {date_str}, {item['year']}.
-        Write a 200-word engaging summary in {lang.upper()} about: {event_info}.
-
-        RULES:
-        - Present the event as occurring strictly on {date_str}, verify a lot of times if it happend on {date_str}
-        - Use vivid, journalistic language — write like a top newspaper journalist
-        - Explain why this still matters to people alive today
-        - Return ONLY JSON: {{ "content": "narrative text here" }}
-        """
-        res = await self._safe_groq_call(
-            prompt, f"Narrative {idx} {lang}", {"content": "Historical data pending."}
+        url = (
+            f"https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/"
+            f"en.wikipedia/all-access/user/{slug_clean}/daily/{start}/{end}"
         )
-        return lang, res.get("content", "Historical data pending.")
-
-    async def _safe_groq_call(self, prompt: str, context: str, fallback: dict) -> dict:
         try:
-            completion = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a strict History API. "
-                            "Output ONLY valid JSON matching the exact schema requested. "
-                            "No markdown, no preamble, no extra keys."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.6,
-                max_completion_tokens=4096,
-                top_p=1,
-                stream=False,
-                stop=None,
-            )
-            return json.loads(completion.choices[0].message.content)
+            async with httpx.AsyncClient(headers=self.headers, timeout=10.0) as client:
+                res = await client.get(url)
+                if res.status_code == 200:
+                    return sum(item["views"] for item in res.json().get("items", []))
+        except Exception:
+            pass
+        return 0
+
+    async def fetch_pro_image(self, query: str) -> Optional[str]:
+        """Fetch a high-quality image from Pexels for the given query."""
+        if not self.pexels_key:
+            return None
+
+        url = f"https://api.pexels.com/v1/search?query={query}&per_page=1"
+        headers = {"Authorization": self.pexels_key}
+        try:
+            async with httpx.AsyncClient(headers=headers, timeout=5.0) as client:
+                res = await client.get(url)
+                if res.status_code == 200:
+                    photos = res.json().get("photos", [])
+                    if photos:
+                        return photos[0]["src"]["large2x"]
         except Exception as e:
-            print(f"🚨 AI Error ({context}): {e}")
-            return fallback
+            logger.warning(f"Pexels fetch failed: {e}")
+        return None
+
+    async def _get_optimized_wiki_url(self, file_name: str) -> Optional[str]:
+        """Resolve a Wikipedia File: title to a 2000px-wide optimized image URL."""
+        file_clean = file_name.replace("File:", "").replace(" ", "_")
+        api_url = (
+            f"https://en.wikipedia.org/w/api.php"
+            f"?action=query&titles=File:{file_clean}"
+            f"&prop=imageinfo&iiprop=url|size&iiurlwidth=2000&format=json"
+        )
+        try:
+            async with httpx.AsyncClient(headers=self.headers, timeout=10.0) as client:
+                res = await client.get(api_url)
+                pages = res.json().get("query", {}).get("pages", {})
+                for p in pages.values():
+                    info = p.get("imageinfo", [{}])[0]
+                    return info.get("thumburl") or info.get("url")
+        except Exception:
+            return None
+
+    async def fetch_gallery_urls(self, title_slug: str, limit: int = 3) -> List[str]:
+        """
+        Fetch up to `limit` clean image URLs from a Wikipedia article.
+        The slug comes directly from the AI — no feed dependency.
+        Filters out SVGs, maps, flags, and GIFs.
+        """
+        valid_urls = []
+        slug_clean = title_slug.replace(" ", "_")
+        wiki_media_url = f"{config.WIKI_BASE_URL}/page/media-list/{slug_clean}"
+
+        async with httpx.AsyncClient(headers=self.headers, timeout=15.0) as client:
+            try:
+                res = await client.get(wiki_media_url)
+                if res.status_code == 200:
+                    items = res.json().get("items", [])
+                    for item in items:
+                        title_lower = item.get("title", "").lower()
+                        is_image = item.get("type") == "image"
+                        is_clean = not any(
+                            x in title_lower for x in [".svg", "map", "flag", "logo", "icon"]
+                        )
+                        if is_image and is_clean:
+                            opt_url = await self._get_optimized_wiki_url(item.get("title"))
+                            if opt_url:
+                                valid_urls.append(opt_url)
+                        if len(valid_urls) >= limit:
+                            break
+            except Exception as e:
+                logger.error(f"Gallery fetch error for '{title_slug}': {e}")
+
+        return valid_urls
+
+    def upload_to_cloudinary(self, image_url: str, public_id: str) -> Optional[str]:
+        """Upload an image URL to Cloudinary with quality/size optimization."""
+        if not image_url:
+            return None
+        try:
+            result = cloudinary.uploader.upload(
+                image_url,
+                public_id=f"history_app/{public_id}",
+                overwrite=True,
+                transformation=[
+                    {"width": 1920, "height": 1080, "crop": "limit"},
+                    {"width": 1600, "height": 900, "crop": "fill", "gravity": "auto"},
+                    {"quality": "auto:best"},
+                    {"fetch_format": "auto"},
+                    {"dpr": "auto"},
+                ],
+            )
+            return result.get("secure_url")
+        except Exception as e:
+            logger.error(f"⚠️ Cloudinary upload failed: {e}")
+            return None
