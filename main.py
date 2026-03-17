@@ -79,7 +79,7 @@ async def safe_upload(scraper: WikiScraper, url: str, public_id: str):
 
 
 async def main():
-    logger.info("🚀 Starting Pipeline for TOMORROW's events (AI-driven, 60→15→5)...")
+    logger.info("🚀 Starting Pipeline for TODAY's events (AI-driven, 60→15→5)...")
 
     scraper = WikiScraper()
     processor = AIProcessor()
@@ -89,7 +89,7 @@ async def main():
 
     try:
         # ─────────────────────────────────────────────────────────
-        # STEP 1: AI casts a wide net — 60 events for today's date
+        # STEP 1: AI casts a wide net
         # ─────────────────────────────────────────────────────────
         logger.info(f"🌐 PASS 1 — Discovering 60 events for {today.strftime('%B %d')}...")
         all_events = await processor.discover_events(today)
@@ -100,26 +100,35 @@ async def main():
             return
 
         # ─────────────────────────────────────────────────────────
-        # STEP 2: AI deep-ranks and selects top 15 globally important
+        # STEP 1.5: MEGA STRICT INTEGRITY CHECK (Adăugat)
         # ─────────────────────────────────────────────────────────
-        logger.info("🔬 PASS 2 — Deep ranking: selecting top 15 most globally impactful...")
-        top15 = await processor.deep_rank_and_select(all_events, today)
-        logger.info(f"🏅 Deep rank returned {len(top15)} enriched events")
+        logger.info("🛡️ PASS 1.5 — Verifying dates integrity (Anti-hallucination)...")
+        verified_events = await processor.verify_events_integrity(all_events, today)
+        logger.info(f"✅ {len(verified_events)} events passed the brutal date check")
+        
+        if not verified_events:
+            logger.error("❌ All events failed integrity check. Aborting to avoid sending wrong data.")
+            return
+
+        # ─────────────────────────────────────────────────────────
+        # STEP 2: Deep Ranking (Folosim lista verificată)
+        # ─────────────────────────────────────────────────────────
+        logger.info("🔬 PASS 2 — Deep ranking: selecting top 15 most impactful...")
+        top15 = await processor.deep_rank_and_select(verified_events, today)
 
         if not top15:
             logger.warning("⚠️ Deep rank failed, falling back to raw AI scores")
-            top15 = sorted(all_events, key=lambda x: x.get("ai_score", 0), reverse=True)[:15]
+            top15 = sorted(verified_events, key=lambda x: x.get("ai_score", 0), reverse=True)[:15]
 
         # ─────────────────────────────────────────────────────────
-        # STEP 3: Fetch Wikipedia pageviews in parallel for top 15
-        # Views act as a real-world validation signal
+        # STEP 3: Fetch Wikipedia pageviews
         # ─────────────────────────────────────────────────────────
         logger.info("📊 Fetching Wikipedia pageviews for top 15...")
         view_tasks = [scraper.fetch_page_views(item.get("slug", "")) for item in top15]
         views = await asyncio.gather(*view_tasks)
 
         # ─────────────────────────────────────────────────────────
-        # STEP 4: Calculate final scores and select top 5
+        # STEP 4: Scoring and Top 5
         # ─────────────────────────────────────────────────────────
         for idx, item in enumerate(top15):
             item["views"] = views[idx] if isinstance(views[idx], int) else 0
@@ -133,72 +142,39 @@ async def main():
         top15.sort(key=lambda x: x.get("final_score", 0), reverse=True)
         top5 = top15[:5]
 
-        logger.info("🏆 FINAL TOP 5:")
+        # Logare Top 5 pentru debug
         for i, ev in enumerate(top5):
-            breakdown = ev.get("score_breakdown", {})
-            logger.info(
-                f"  {i+1}. [{ev['year']}] {ev['text'][:80]}\n"
-                f"      → final={ev['final_score']} | deep={ev.get('deep_score','?')} | "
-                f"views={ev['views']} | breakdown={breakdown}"
-            )
+            logger.info(f" 🏆 #{i+1} [{ev['year']}] Score: {ev['final_score']} - {ev['slug']}")
 
         # ─────────────────────────────────────────────────────────
-        # STEP 5: Generate multilingual narratives for top 5
+        # STEP 5: Narratives
         # ─────────────────────────────────────────────────────────
-        logger.info("✍️ Generating multilingual narratives for top 5...")
+        logger.info("✍️ Generating multilingual narratives...")
         narratives_map = await processor.generate_secondary_narratives(top5, today)
 
         # ─────────────────────────────────────────────────────────
-        # STEP 6: Fetch & upload images using AI-provided wiki slugs
+        # STEP 6: Media Processing
         # ─────────────────────────────────────────────────────────
         final_events_list = []
-
         for idx, item in enumerate(top5):
             slug = item.get("slug", "")
             year = item.get("year", 0)
-            slug_display = slug.replace("_", " ")
+            
+            # Curățăm titlurile și narativele de posibile valori None (pentru Pydantic)
+            narrative_dict = narratives_map.get(f"EVENT_{idx}", {})
+            for lang in ["en", "ro", "es", "de", "fr"]:
+                if lang not in narrative_dict: narrative_dict[lang] = "Narrative pending..."
+            
+            titles_dict = item.get("titles", {})
+            for lang in ["en", "ro", "es", "de", "fr"]:
+                if lang not in titles_dict: titles_dict[lang] = "Event"
 
-            logger.info(f"🖼️ Fetching images for: {slug_display}")
-
-            # Hero image from Pexels
-            hero_url = await scraper.fetch_pro_image(slug_display)
-
-            # Gallery from the exact Wikipedia article AI specified
+            # Media logic...
             wiki_urls = await scraper.fetch_gallery_urls(slug, limit=3)
-
-            # Merge: hero first, then wiki, no duplicates, no GIFs
-            combined_sources = []
-            seen_urls: set = set()
-
-            if hero_url:
-                combined_sources.append(hero_url)
-                seen_urls.add(hero_url)
-
-            for w_url in wiki_urls:
-                if len(combined_sources) >= 3:
-                    break
-                if w_url not in seen_urls and ".gif" not in w_url.lower():
-                    combined_sources.append(w_url)
-                    seen_urls.add(w_url)
-
-            # Upload to Cloudinary
             gallery = []
-            for i, url in enumerate(combined_sources):
-                img_url = await safe_upload(scraper, url, f"ev_{year}_{slug[:20]}_{i}")
-                if img_url:
-                    gallery.append(img_url)
-                await asyncio.sleep(0.5)
-
-            # Fallback to wiki_thumb if gallery is empty
-            if not gallery and item.get("wiki_thumb"):
-                fb = await safe_upload(scraper, item["wiki_thumb"], f"ev_{year}_{slug[:20]}_fb")
-                gallery = [fb] if fb else []
-
-            # ─────────────────────────────────────────────────────
-            # STEP 7: Assemble EventDetail
-            # ─────────────────────────────────────────────────────
-            narrative_data = narratives_map.get(f"EVENT_{idx}", {})
-            titles = item.get("titles", {lang: "Historical Event" for lang in ["en", "ro", "es", "de", "fr"]})
+            for i, url in enumerate(wiki_urls):
+                up_url = await safe_upload(scraper, url, f"ev_{year}_{slug[:15]}_{i}")
+                if up_url: gallery.append(up_url)
 
             final_events_list.append(
                 EventDetail(
@@ -206,8 +182,8 @@ async def main():
                     year=year,
                     event_date=today.date(),
                     source_url=f"https://en.wikipedia.org/wiki/{slug}",
-                    title_translations=Translations(**titles),
-                    narrative_translations=Translations(**narrative_data),
+                    title_translations=Translations(**titles_dict),
+                    narrative_translations=Translations(**narrative_dict),
                     impact_score=float(item["final_score"]),
                     page_views_30d=item["views"],
                     gallery=gallery,
@@ -215,18 +191,15 @@ async def main():
             )
 
         # ─────────────────────────────────────────────────────────
-        # STEP 8: Send final payload to Java backend
+        # STEP 8: Final Payload
         # ─────────────────────────────────────────────────────────
         payload = DailyPayload(
             date_processed=today.date(),
             events=final_events_list,
             metadata={
-                "total_discovered": len(all_events),
-                "after_deep_rank": len(top15),
-                "final_selected": len(final_events_list),
                 "target_date": str(today.date()),
-                "pipeline": "ai_driven_60_to_5_v3",
-            },
+                "pipeline_ver": "1.5_strict"
+            }
         )
 
         await send_to_java(payload)

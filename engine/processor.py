@@ -4,45 +4,47 @@ from datetime import datetime
 from groq import Groq
 from core.config import config
 from schema.models import EventCategory
+from core.logger import setup_logger
 
+logger = setup_logger("AIProcessor")
 
 class AIProcessor:
     def __init__(self, model: str = config.AI_MODEL):
         self.client = Groq(api_key=config.GROQ_API_KEY)
-        self.model = model  # "moonshotai/kimi-k2-instruct-0905"
+        self.model = model
         self.categories_list = [c.value for c in EventCategory]
         self.languages = ["en", "ro", "es", "de", "fr"]
 
     def _get_target_date_str(self, target_date: datetime) -> str:
         return target_date.strftime("%B %d")
 
-    def _ensure_langs(self, data: dict, fallback_text: str = "Title pending") -> dict:
+    def _ensure_langs(self, data: dict, fallback_text: str = "Data pending") -> dict:
         if not isinstance(data, dict):
             data = {}
         return {lang: data.get(lang) or fallback_text for lang in self.languages}
 
     async def discover_events(self, target_date: datetime) -> list:
         """
-        PASS 1 — Cast a wide net: AI returns 60 historical events for this date.
-        No filtering yet — we want breadth across all eras and categories.
+        PASS 1 — Discovery cu rigoare istorică maximă.
         """
         date_str = self._get_target_date_str(target_date)
 
         prompt = f"""
-        You are a world-class historian. List exactly 60 historical events that occurred on {date_str} throughout all of recorded history.
+        You are a meticulous Senior Historian and Fact-Checker. 
+        List historical events that occurred EXACTLY on {date_str}.
 
-        Cast the widest possible net:
-        - Ancient history through modern times
-        - All continents and civilizations
-        - All domains: science, war, politics, exploration, culture, technology, religion, economics, natural disasters, sports milestones
-        - Include both famous AND lesser-known but genuinely important events
+        CRITICAL RULES:
+        1. DATE INTEGRITY: Every event MUST have occurred on {date_str}. Do not include events from the 16th or 18th.
+        2. VERIFICATION: Distinguish between "Ultimatums" and "Actual Invasions". If the invasion started on the 20th, it does NOT belong on the 17th.
+        3. QUANTITY: Aim for 60 events, but PRIORITIZE accuracy. If only 40 are 100% verified, return only 40.
+        4. NO HALLUCINATIONS: If you are not certain of the day, exclude it.
 
-        STRICT JSON SCHEMA — return ONLY this:
+        STRICT JSON SCHEMA:
         {{
           "events": [
             {{
               "year": 1945,
-              "text": "One clear sentence describing exactly what happened.",
+              "text": "Precise historical description.",
               "slug": "Exact_Wikipedia_Article_Title",
               "category": "one_from_allowed_list",
               "ai_score": 75
@@ -50,166 +52,148 @@ class AIProcessor:
           ]
         }}
 
-        RULES:
-        - "slug" = exact Wikipedia article title with underscores (e.g. "World_War_II", "Marie_Curie")
-        - "category" must be one of: {self.categories_list}
-        - "ai_score" = raw historical significance 0-100 (do NOT overthink this yet, just a first pass)
-        - Return EXACTLY 60 events, no more, no less
-        - NO duplicates
+        ALLOWED CATEGORIES: {self.categories_list}
         """
 
-        res = await self._safe_groq_call(prompt, "Event Discovery (60)", {"events": []})
+        res = await self._safe_groq_call(prompt, f"Discovery ({date_str})", {"events": []})
         events = res.get("events", [])
 
         validated = []
+        seen_slugs = set()
         for e in events:
-            if not isinstance(e.get("year"), int):
-                continue
-            if not e.get("text") or not e.get("slug"):
+            slug = e.get("slug")
+            if not isinstance(e.get("year"), int) or not slug or slug in seen_slugs:
                 continue
             if e.get("category") not in self.categories_list:
                 e["category"] = EventCategory.CULTURE_ARTS.value
-            e["ai_score"] = max(0, min(100, int(e.get("ai_score", 50))))
+            
+            seen_slugs.add(slug)
             validated.append(e)
 
+        logger.info(f"✅ Found {len(validated)} candidate events for {date_str}")
         return validated
+
+    async def verify_events_integrity(self, events: list, target_date: datetime) -> list:
+        """
+        PASS 1.5 — The "Grand Inquisitor". 
+        Elimină tot ce nu este 100% confirmat pentru ziua respectivă.
+        """
+        date_str = self._get_target_date_str(target_date)
+        
+        check_list = [
+            {"id": i, "year": e['year'], "slug": e['slug'], "summary": e['text'][:100]} 
+            for i, e in enumerate(events)
+        ]
+
+        prompt = f"""
+        You are a brutal Fact-Checking Bot. Analyze these events for {date_str}.
+        ELIMINATE any event that did not happen on exactly {date_str}.
+
+        EXAMPLES OF ERRORS TO CATCH:
+        - Iraq War: Started March 20, NOT March 17.
+        - Battle of al-Qadisiyyah: Happened in November, NOT March.
+
+        EVENTS TO CHECK:
+        {json.dumps(check_list)}
+
+        RETURN ONLY JSON:
+        {{
+          "results": [
+            {{ "id": 0, "is_valid": true/false, "reason": "why" }}
+          ]
+        }}
+        """
+
+        res = await self._safe_groq_call(prompt, "Integrity Check", {"results": []})
+        results_map = {r['id']: r for r in res.get("results", [])}
+
+        verified = []
+        for i, event in enumerate(events):
+            v_info = results_map.get(i, {"is_valid": False})
+            if v_info.get("is_valid"):
+                verified.append(event)
+            else:
+                logger.warning(f"🚫 ELIMINATED: {event['year']} {event['slug']} - Reason: {v_info.get('reason')}")
+
+        return verified
 
     async def deep_rank_and_select(self, candidates: list, target_date: datetime) -> list:
         """
-        PASS 2 — Deep ranking: from 60 candidates, AI picks the 15 most globally important.
-
-        Scoring criteria:
-        - How many humans were affected (directly or indirectly)?
-        - Did it change the course of history permanently?
-        - Would someone from ANY country, culture, or background recognize this?
-        - Does it have emotional resonance? (awe, fear, pride, curiosity)
-        - Is it a "first ever" or "end of an era" moment?
+        PASS 2 — Ranking pe baza impactului global.
         """
+        if not candidates: return []
+        
         date_str = self._get_target_date_str(target_date)
-        candidates_text = "\n".join(
-            [f"ID_{i}: ({e['year']}) {e['text'][:200]}" for i, e in enumerate(candidates)]
-        )
+        candidates_text = "\n".join([f"ID_{i}: ({e['year']}) {e['text'][:200]}" for i, e in enumerate(candidates)])
 
         prompt = f"""
-        You are ranking historical events for a global "Today in History" app used by people from every country.
-        DATE: {date_str}
-
-        From the list below, select and deeply score the 15 MOST GLOBALLY IMPACTFUL events.
-
-        SCORING CRITERIA (apply all, no exceptions):
-        1. GLOBAL REACH (0-30 pts): How many humans on Earth were affected? Billions > Millions > Thousands
-        2. PERMANENCE (0-25 pts): Did this permanently alter the course of human history?
-        3. UNIVERSAL RECOGNITION (0-20 pts): Would a person from Brazil, Japan, Nigeria, and Germany all know this?
-        4. EMOTIONAL POWER (0-15 pts): Does it inspire awe, shock, pride, or wonder in any human?
-        5. UNIQUENESS (0-10 pts): Was this a "first ever", "last ever", or "only time in history"?
+        Rank the 15 most globally impactful events for {date_str}.
+        Criteria: Global reach, permanence, universal recognition, emotional power.
 
         STRICT JSON SCHEMA:
         {{
           "top15": [
             {{
-              "original_id": "ID_7",
-              "deep_score": 94,
-              "score_breakdown": {{
-                "global_reach": 28,
-                "permanence": 24,
-                "universal_recognition": 19,
-                "emotional_power": 14,
-                "uniqueness": 9
-              }},
-              "titles": {{
-                "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..."
-              }}
+              "original_id": "ID_0",
+              "deep_score": 95,
+              "score_breakdown": {{ "global_reach": 30, "permanence": 25, "universal_recognition": 20, "emotional_power": 15, "uniqueness": 5 }},
+              "titles": {{ "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..." }}
             }}
           ]
         }}
-
-        RULES:
-        - Select EXACTLY 15 events from the list
-        - Order by deep_score descending
-        - Titles must be punchy, emotional, under 10 words each
-        - Prefer events that would make someone stop scrolling and think "wow, this happened TODAY in history?"
 
         CANDIDATES:
         {candidates_text}
         """
 
-        res = await self._safe_groq_call(prompt, "Deep Rank (15 from 60)", {"top15": []})
-        top15_raw = res.get("top15", [])
-
-        # Map back to original candidate data + enrich with deep scores
-        id_to_candidate = {f"ID_{i}": e for i, e in enumerate(candidates)}
+        res = await self._safe_groq_call(prompt, "Deep Rank", {"top15": []})
+        id_map = {f"ID_{i}": e for i, e in enumerate(candidates)}
+        
         enriched = []
-
-        for entry in top15_raw:
-            original_id = entry.get("original_id", "")
-            candidate = id_to_candidate.get(original_id)
-            if not candidate:
-                continue
-
-            breakdown = entry.get("score_breakdown", {})
-            candidate["deep_score"] = max(0, min(100, int(entry.get("deep_score", 50))))
-            candidate["score_breakdown"] = breakdown
-            candidate["titles"] = self._ensure_langs(entry.get("titles", {}), "Historical Event")
-            enriched.append(candidate)
-
+        for entry in res.get("top15", []):
+            original_id = entry.get("original_id")
+            if original_id in id_map:
+                item = id_map[original_id]
+                item.update({
+                    "deep_score": entry.get("deep_score", 50),
+                    "score_breakdown": entry.get("score_breakdown", {}),
+                    "titles": self._ensure_langs(entry.get("titles", {}))
+                })
+                enriched.append(item)
         return enriched
 
     async def generate_secondary_narratives(self, top_events: list, target_date: datetime):
-        """Generate short narratives for top 5 events in all 5 languages."""
         date_str = self._get_target_date_str(target_date)
-
+        
         async def process_single(idx, item):
-            event_tasks = [
-                self._fetch_secondary_lang(idx, item, lang, date_str)
-                for lang in self.languages
-            ]
-            lang_results = await asyncio.gather(*event_tasks)
-            return f"EVENT_{idx}", dict(lang_results)
+            # Verificare de siguranță suplimentară în promptul de narativ
+            tasks = [self._fetch_secondary_lang(idx, item, lang, date_str) for lang in self.languages]
+            return f"EVENT_{idx}", dict(await asyncio.gather(*tasks))
 
-        tasks = [process_single(i, item) for i, item in enumerate(top_events)]
-        final_results = await asyncio.gather(*tasks)
-        return dict(final_results)
+        return dict(await asyncio.gather(*[process_single(i, item) for i, item in enumerate(top_events)]))
 
     async def _fetch_secondary_lang(self, idx, item, lang, date_str):
-        event_info = f"{item['year']} — {item['text'][:300]}"
         prompt = f"""
-        DATE IN HISTORY: {date_str}, {item['year']}.
-        Write a 200-word engaging summary in {lang.upper()} about: {event_info}.
-
-        RULES:
-        - Present the event as occurring on {date_str}
-        - Use vivid, journalistic language — write like a top newspaper journalist
-        - Explain why this still matters to people alive today
-        - Return ONLY JSON: {{ "content": "narrative text here" }}
+        Write a 200-word journalistic summary in {lang.upper()} for: {item['year']} - {item['text']}.
+        Ensure the narrative explicitly confirms this happened on {date_str}.
+        Return JSON: {{ "content": "..." }}
         """
-        res = await self._safe_groq_call(
-            prompt, f"Narrative {idx} {lang}", {"content": "Historical data pending."}
-        )
-        return lang, res.get("content", "Historical data pending.")
+        res = await self._safe_groq_call(prompt, f"Narrative {idx}:{lang}", {"content": "Data pending"})
+        return lang, res.get("content", "Data pending")
 
     async def _safe_groq_call(self, prompt: str, context: str, fallback: dict) -> dict:
         try:
             completion = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a strict History API. "
-                            "Output ONLY valid JSON matching the exact schema requested. "
-                            "No markdown, no preamble, no extra keys."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
+                    {"role": "system", "content": "You are a strict History API. Output ONLY valid JSON."},
+                    {"role": "user", "content": prompt}
                 ],
                 response_format={"type": "json_object"},
-                temperature=0.6,
-                max_completion_tokens=4096,
-                top_p=1,
-                stream=False,
-                stop=None,
+                temperature=0.1, # Temperatură mică pentru precizie maximă
+                max_completion_tokens=4096
             )
             return json.loads(completion.choices[0].message.content)
         except Exception as e:
-            print(f"🚨 AI Error ({context}): {e}")
+            logger.error(f"🚨 AI Error ({context}): {e}")
             return fallback
