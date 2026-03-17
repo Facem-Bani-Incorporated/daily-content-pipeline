@@ -177,7 +177,7 @@ class AIProcessor:
         Write a 200-word engaging summary in {lang.upper()} about: {event_info}.
 
         RULES:
-        - Present the event as occurring on {date_str}
+        - Present the event as occurring strictly on {date_str}, verify a lot of times if it happend on {date_str}
         - Use vivid, journalistic language — write like a top newspaper journalist
         - Explain why this still matters to people alive today
         - Return ONLY JSON: {{ "content": "narrative text here" }}
