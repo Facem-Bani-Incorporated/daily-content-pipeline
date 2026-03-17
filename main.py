@@ -1,23 +1,23 @@
 import asyncio
-import httpx
+import math
+import time
 import hmac
 import hashlib
-import time
 import base64
 import json
+import httpx
 from datetime import datetime
 
 from core.logger import setup_logger
 from core.config import config
 from engine.scraper import SmartWikiScraper
-from engine.ranker import ScoringEngine
+from engine.processor import AIProcessor  # <--- Asigură-te că ai acest import
 from schema.models import DailyPayload, EventDetail, EventCategory, Translations
 
 logger = setup_logger("MainPipeline")
 
-
 # ─────────────────────────────────────────
-# SEND TO JAVA
+# SEND TO JAVA (Rămâne neschimbat, e corect)
 # ─────────────────────────────────────────
 async def send_to_java(payload: DailyPayload):
     target_url = config.JAVA_BACKEND_URL
@@ -63,153 +63,101 @@ async def send_to_java(payload: DailyPayload):
         try:
             logger.info(f"📤 Sending to Java: {target_url}")
             res = await client.post(target_url, content=body_json, headers=headers)
-
             if res.status_code in [200, 201]:
                 logger.info("✅ SUCCESS!")
             else:
                 logger.error(f"❌ {res.status_code}: {res.text}")
-
         except Exception as e:
             logger.error(f"🚨 Connection error: {e}")
 
-
 # ─────────────────────────────────────────
-# SAFE UPLOAD
+# SAFE UPLOAD (Cloudinary)
 # ─────────────────────────────────────────
 async def safe_upload(scraper, url: str, public_id: str):
-    if not url:
-        return None
+    if not url: return None
     try:
+        # Folosim to_thread pentru că operațiile Cloudinary sunt blocking (sync)
         return await asyncio.to_thread(scraper.upload_to_cloudinary, url, public_id)
     except Exception:
         return None
-
 
 # ─────────────────────────────────────────
 # MAIN PIPELINE
 # ─────────────────────────────────────────
 async def main():
-    logger.info("🚀 Smart Pipeline Started")
+    logger.info("🚀 Starting Elite History Pipeline")
 
     scraper = SmartWikiScraper()
-    ranker = ScoringEngine()
-
+    processor = AIProcessor() # Motorul de rescriere și traducere
     today = datetime.now()
 
     try:
-        # ─────────────────────────────────────
-        # STEP 1: GET EVENTS (SMART SCRAPER)
-        # ─────────────────────────────────────
-        logger.info("🌐 Fetching smart events...")
-        events = await scraper.get_today_interesting_events(limit=50)
-
-        if not events:
-            logger.error("❌ No events found")
+        # STEP 1: Extragem evenimentele verificate (SELECTED)
+        # Noul scraper elimină deja țările/orașele prin blacklist
+        candidates = await scraper.get_today_elite_events()
+        if not candidates:
+            logger.error("❌ No elite events found today")
             return
 
-        # ─────────────────────────────────────
-        # STEP 2: PAGE VIEWS
-        # ─────────────────────────────────────
-        logger.info("📊 Fetching page views...")
-        tasks = [
-            scraper.fetch_page_views(ev.get("slug", ""))
-            for ev in events
-        ]
+        # STEP 2: Calculăm Popularitatea (PageViews) în paralel
+        logger.info(f"📊 Analyzing popularity for {len(candidates)} candidates...")
+        view_tasks = [scraper.fetch_page_views(c["slug"]) for c in candidates]
+        views_results = await asyncio.gather(*view_tasks)
 
-        views = await asyncio.gather(*tasks)
+        for i, count in enumerate(views_results):
+            candidates[i]["views"] = count
 
-        # ─────────────────────────────────────
-        # STEP 3: FINAL SCORING
-        # ─────────────────────────────────────
-        for i, ev in enumerate(events):
-            ev["views"] = views[i] if isinstance(views[i], int) else 0
+        # STEP 3: Scoring Matematic (Importanță Istorică + Popularitate Actuală)
+        for c in candidates:
+            # Bonus pentru epoca modernă (mai mult conținut media disponibil)
+            recency_bonus = 25 if c["year"] > 1800 else 0
+            # Formula logaritmică: echilibrează evenimentele virale cu cele de nișă
+            c["final_score"] = (math.log10(c["views"] + 1) * 12) + recency_bonus
 
-            ev["final_score"] = ranker.calculate_final_score(
-                ai_score=ev.get("interest_score", 50),
-                views=ev["views"],
-                category="history",
-                year=ev.get("year", 0),
-            )
+        # Sortăm și luăm cele mai bune 5
+        candidates.sort(key=lambda x: x["final_score"], reverse=True)
+        top5 = candidates[:5]
 
-        events.sort(key=lambda x: x["final_score"], reverse=True)
-        top5 = events[:5]
-
-        logger.info("🏆 FINAL TOP 5:")
-        for i, ev in enumerate(top5):
-            logger.info(f"{i+1}. [{ev['year']}] {ev['text'][:80]}")
-
-        # ─────────────────────────────────────
-        # STEP 4: BUILD FINAL OBJECTS
-        # ─────────────────────────────────────
+        # STEP 4: Procesare AI (Narațiune, Categorisire, Traducere)
         final_events = []
-
         for ev in top5:
-            slug = ev.get("slug", "")
-            year = ev.get("year", 0)
+            logger.info(f"✍️ AI Polishing: {ev['slug']} ({ev['year']})")
+            
+            # AI-ul transformă textul sec de pe Wiki în poveste
+            # Și returnează categorisirea corectă (WAR, SCIENCE, etc.)
+            ai_data = await processor.polish_event(ev) 
 
-            # images
-            hero = await scraper.fetch_pro_image(slug)
-            gallery_urls = await scraper.fetch_gallery_urls(slug)
-
-            combined = []
-            if hero:
-                combined.append(hero)
-
-            combined.extend(gallery_urls[:2])
-
-            gallery = []
-            for i, url in enumerate(combined):
-                uploaded = await safe_upload(scraper, url, f"{slug}_{i}")
-                if uploaded:
-                    gallery.append(uploaded)
-
-            # simple translations fallback
-            title = ev["text"][:60]
+            # Imagini HQ (Cloudinary)
+            # Prioritizăm imaginea mare de la Wiki dacă există
+            hq_image = ev.get("thumbnail") 
+            cloud_url = await safe_upload(scraper, hq_image, f"ev_{ev['year']}_{ev['slug']}")
 
             final_events.append(
                 EventDetail(
-                    category=EventCategory("culture_arts"),
-                    year=year,
+                    category=ai_data["category"], 
+                    year=ev["year"],
                     event_date=today.date(),
-                    source_url=f"https://en.wikipedia.org/wiki/{slug}",
-                    title_translations=Translations(
-                        en=title,
-                        ro=title,
-                        es=title,
-                        de=title,
-                        fr=title,
-                    ),
-                    narrative_translations=Translations(
-                        en=ev["text"],
-                        ro=ev["text"],
-                        es=ev["text"],
-                        de=ev["text"],
-                        fr=ev["text"],
-                    ),
+                    source_url=f"https://en.wikipedia.org/wiki/{ev['slug']}",
+                    title_translations=ai_data["titles"],
+                    narrative_translations=ai_data["narratives"],
                     impact_score=float(ev["final_score"]),
                     page_views_30d=ev["views"],
-                    gallery=gallery,
+                    gallery=[cloud_url] if cloud_url else []
                 )
             )
 
-        # ─────────────────────────────────────
-        # STEP 5: SEND
-        # ─────────────────────────────────────
+        # STEP 5: Trimitere către Backend
         payload = DailyPayload(
             date_processed=today.date(),
             events=final_events,
-            metadata={
-                "total": len(events),
-                "final": len(final_events),
-                "pipeline": "smart_scraper_v1",
-            },
+            metadata={"source": "wiki_elite_selection", "version": "2.0"}
         )
 
         await send_to_java(payload)
+        logger.info("🏁 Pipeline completed successfully!")
 
     except Exception as e:
         logger.error(f"🚨 Pipeline crash: {e}", exc_info=True)
-
 
 if __name__ == "__main__":
     asyncio.run(main())

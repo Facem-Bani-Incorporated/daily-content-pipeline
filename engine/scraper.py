@@ -1,35 +1,49 @@
 import httpx
 from datetime import datetime
 from typing import List, Dict
+import asyncio
 
 from core.config import config
 from core.logger import setup_logger
-from engine.base_scraper import WikiScraper
 
-logger = setup_logger("SmartScraper")
+logger = setup_logger("EliteScraper")
 
-
-class SmartWikiScraper(WikiScraper):
+class SmartWikiScraper:
     def __init__(self):
-        super().__init__()
-
-        self.strong_keywords = [
-            "war", "battle", "revolution", "independence",
-            "explosion", "assassinated", "killed",
-            "founded", "discovered", "invented",
-            "first", "launch", "moon", "space",
-            "record", "breakthrough", "treaty",
-            "attack", "bomb", "crash", "disaster"
+        self.headers = {"User-Agent": f"HistoryApp/1.0 ({config.CONTACT_EMAIL})"}
+        # Cuvinte care semnalează un articol plictisitor/administrativ
+        self.blacklist_terms = [
+            "country", "republic", "state", "continent", "capital city", 
+            "administrative", "municipality", "census-designated", "village"
         ]
 
-        self.weak_keywords = [
-            "appointed", "elected", "becomes", "publishes",
-            "opens", "established", "born", "dies"
-        ]
+    async def fetch_page_views(self, slug: str) -> int:
+        """Calculăm popularitatea reală pe ultimele 30 de zile."""
+        from datetime import timedelta
+        today_str = datetime.now().strftime("%Y%m%d")
+        last_month_str = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
+        
+        url = (f"https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/"
+               f"en.wikipedia/all-access/user/{slug}/daily/{last_month_str}/{today_str}")
+        
+        async with httpx.AsyncClient(headers=self.headers, timeout=5.0) as client:
+            try:
+                res = await client.get(url)
+                if res.status_code == 200:
+                    data = res.json()
+                    return sum(item["views"] for item in data.get("items", []))
+            except:
+                return 0
+        return 0
 
-    async def fetch_today_events(self) -> List[Dict]:
+    async def get_today_elite_events(self) -> List[Dict]:
+        """
+        Punctul cheie: Folosim endpoint-ul 'selected' care conține DOAR 
+        evenimente verificate manual de editorii Wikipedia ca fiind importante.
+        """
         now = datetime.now()
-        url = f"{config.WIKI_BASE_URL}/feed/onthisday/events/{now.month}/{now.day}"
+        # Endpoint-ul 'all' ne dă 'selected', 'events', 'births', 'deaths'
+        url = f"https://en.wikipedia.org/api/rest_v1/feed/onthisday/all/{now.month:02d}/{now.day:02d}"
 
         async with httpx.AsyncClient(headers=self.headers, timeout=20.0) as client:
             try:
@@ -37,84 +51,38 @@ class SmartWikiScraper(WikiScraper):
                 res.raise_for_status()
                 data = res.json()
 
-                events = data.get("events", []) + data.get("selected", [])
-                logger.info(f"🌐 Raw events fetched: {len(events)}")
+                # PRIORITATE 1: Evenimentele 'selected' (curate de oameni)
+                # PRIORITATE 2: Evenimentele 'events' (brute, dacă 'selected' e prea scurt)
+                raw_list = data.get("selected", [])
+                if len(raw_list) < 10:
+                    raw_list += data.get("events", [])
 
-                return events
+                clean_events = []
+                for ev in raw_list:
+                    pages = ev.get("pages", [])
+                    if not pages: continue
+                    
+                    main_page = pages[0]
+                    description = main_page.get("description", "").lower()
+                    
+                    # FILTRU DE ELITĂ: Eliminăm "gunoiul" administrativ
+                    if any(term in description for term in self.blacklist_terms):
+                        continue
+
+                    # Eliminăm evenimentele fără an sau text
+                    if not ev.get("year") or not ev.get("text"):
+                        continue
+
+                    clean_events.append({
+                        "year": ev["year"],
+                        "text": ev["text"],
+                        "slug": main_page.get("titles", {}).get("canonical"),
+                        "description": description,
+                        "thumbnail": main_page.get("thumbnail", {}).get("source") if main_page.get("thumbnail") else None
+                    })
+
+                return clean_events
 
             except Exception as e:
-                logger.error(f"❌ Wiki fetch failed: {e}")
+                logger.error(f"❌ Scraper failed: {e}")
                 return []
-
-    def normalize_events(self, raw_events: List[Dict]) -> List[Dict]:
-        clean = []
-
-        for ev in raw_events:
-            pages = ev.get("pages", [])
-            if not pages:
-                continue
-
-            slug = pages[0].get("titles", {}).get("canonical")
-            thumb = pages[0].get("thumbnail", {}).get("source")
-
-            if not slug or not ev.get("text"):
-                continue
-
-            clean.append({
-                "year": ev.get("year"),
-                "text": ev.get("text"),
-                "slug": slug,
-                "wiki_thumb": thumb
-            })
-
-        logger.info(f"🧹 Normalized events: {len(clean)}")
-        return clean
-
-    def score_event(self, text: str, year: int) -> int:
-        text_lower = text.lower()
-        score = 0
-
-        for k in self.strong_keywords:
-            if k in text_lower:
-                score += 30
-
-        for k in self.weak_keywords:
-            if k in text_lower:
-                score -= 10
-
-        if year:
-            if year > 1900:
-                score += 20
-            elif year > 1800:
-                score += 10
-
-        if len(text) > 120:
-            score += 10
-
-        return score
-
-    def filter_interesting(self, events: List[Dict]) -> List[Dict]:
-        scored = []
-
-        for ev in events:
-            score = self.score_event(ev["text"], ev.get("year", 0))
-            ev["interest_score"] = score
-
-            if score >= 20:
-                scored.append(ev)
-
-        logger.info(f"🔥 Interesting events: {len(scored)}")
-        return scored
-
-    def rank_events(self, events: List[Dict], limit: int = 25) -> List[Dict]:
-        events.sort(key=lambda x: x.get("interest_score", 0), reverse=True)
-        return events[:limit]
-
-    async def get_today_interesting_events(self, limit: int = 25) -> List[Dict]:
-        raw = await self.fetch_today_events()
-        normalized = self.normalize_events(raw)
-        filtered = self.filter_interesting(normalized)
-        ranked = self.rank_events(filtered, limit)
-
-        logger.info(f"🏆 Final selected events: {len(ranked)}")
-        return ranked
