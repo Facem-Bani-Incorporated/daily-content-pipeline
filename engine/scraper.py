@@ -4,16 +4,14 @@ from typing import List, Dict
 
 from core.config import config
 from core.logger import setup_logger
-from engine.scraper import WikiScraper  # IMPORTANT
+from engine.base_scraper import WikiScraper
 
 logger = setup_logger("SmartScraper")
 
 
-class SmartWikiScraper(WikiScraper):  # 🔥 EXTINDE VECHIUL SCRAPER
+class SmartWikiScraper(WikiScraper):
     def __init__(self):
-        super().__init__()  # 🔥 FOARTE IMPORTANT
-
-        self.headers = {"User-Agent": config.USER_AGENT}
+        super().__init__()
 
         self.strong_keywords = [
             "war", "battle", "revolution", "independence",
@@ -29,9 +27,6 @@ class SmartWikiScraper(WikiScraper):  # 🔥 EXTINDE VECHIUL SCRAPER
             "opens", "established", "born", "dies"
         ]
 
-    # ─────────────────────────────────────────
-    # FETCH REAL EVENTS
-    # ─────────────────────────────────────────
     async def fetch_today_events(self) -> List[Dict]:
         now = datetime.now()
         url = f"{config.WIKI_BASE_URL}/feed/onthisday/events/{now.month}/{now.day}"
@@ -51,9 +46,6 @@ class SmartWikiScraper(WikiScraper):  # 🔥 EXTINDE VECHIUL SCRAPER
                 logger.error(f"❌ Wiki fetch failed: {e}")
                 return []
 
-    # ─────────────────────────────────────────
-    # NORMALIZE
-    # ─────────────────────────────────────────
     def normalize_events(self, raw_events: List[Dict]) -> List[Dict]:
         clean = []
 
@@ -78,9 +70,6 @@ class SmartWikiScraper(WikiScraper):  # 🔥 EXTINDE VECHIUL SCRAPER
         logger.info(f"🧹 Normalized events: {len(clean)}")
         return clean
 
-    # ─────────────────────────────────────────
-    # SCORE
-    # ─────────────────────────────────────────
     def score_event(self, text: str, year: int) -> int:
         text_lower = text.lower()
         score = 0
@@ -104,9 +93,6 @@ class SmartWikiScraper(WikiScraper):  # 🔥 EXTINDE VECHIUL SCRAPER
 
         return score
 
-    # ─────────────────────────────────────────
-    # FILTER
-    # ─────────────────────────────────────────
     def filter_interesting(self, events: List[Dict]) -> List[Dict]:
         scored = []
 
@@ -120,16 +106,10 @@ class SmartWikiScraper(WikiScraper):  # 🔥 EXTINDE VECHIUL SCRAPER
         logger.info(f"🔥 Interesting events: {len(scored)}")
         return scored
 
-    # ─────────────────────────────────────────
-    # RANK
-    # ─────────────────────────────────────────
     def rank_events(self, events: List[Dict], limit: int = 25) -> List[Dict]:
         events.sort(key=lambda x: x.get("interest_score", 0), reverse=True)
         return events[:limit]
 
-    # ─────────────────────────────────────────
-    # FINAL
-    # ─────────────────────────────────────────
     async def get_today_interesting_events(self, limit: int = 25) -> List[Dict]:
         raw = await self.fetch_today_events()
         normalized = self.normalize_events(raw)
