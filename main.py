@@ -9,7 +9,7 @@ from datetime import datetime
 
 from core.logger import setup_logger
 from core.config import config
-from engine.smart_scraper import SmartWikiScraper
+from engine.scraper import SmartWikiScraper
 from engine.processor import AIProcessor
 from engine.ranker import ScoringEngine
 from schema.models import DailyPayload, EventDetail, EventCategory, Translations
