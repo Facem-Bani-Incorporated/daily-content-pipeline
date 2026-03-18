@@ -180,7 +180,7 @@ async def main():
                 EventDetail(
                     category=EventCategory(item["category"].lower()),
                     year=year,
-                    event_date=today.date(),
+                    event_date=datetime(year, today.month, today.day).date(),
                     source_url=f"https://en.wikipedia.org/wiki/{slug}",
                     title_translations=Translations(**titles_dict),
                     narrative_translations=Translations(**narrative_dict),
