@@ -79,58 +79,76 @@ async def safe_upload(scraper: WikiScraper, url: str, public_id: str):
 
 
 async def main():
-    logger.info("🚀 Starting Pipeline for TODAY's events (AI-driven, 60→15→5)...")
+    logger.info("🚀 Starting Pipeline (5-pass verification: AI → Integrity → Rank → Wikipedia → Final)")
 
     scraper = WikiScraper()
     processor = AIProcessor()
     ranker = ScoringEngine()
 
     today = datetime.now()
+    date_str = today.strftime("%B %d")
 
     try:
         # ─────────────────────────────────────────────────────────
-        # STEP 1: AI casts a wide net
+        # PASS 1: AI Discovery (wide net)
         # ─────────────────────────────────────────────────────────
-        logger.info(f"🌐 PASS 1 — Discovering 60 events for {today.strftime('%B %d')}...")
+        logger.info(f"🌐 PASS 1 — Discovering events for {date_str}...")
         all_events = await processor.discover_events(today)
-        logger.info(f"📋 Got {len(all_events)} validated events from AI")
+        logger.info(f"📋 Got {len(all_events)} high-confidence events from AI")
 
         if not all_events:
             logger.error("❌ AI returned no events. Aborting.")
             return
 
         # ─────────────────────────────────────────────────────────
-        # STEP 1.5: MEGA STRICT INTEGRITY CHECK (Adăugat)
+        # PASS 1.5: AI Integrity Check (adversarial)
         # ─────────────────────────────────────────────────────────
-        logger.info("🛡️ PASS 1.5 — Verifying dates integrity (Anti-hallucination)...")
-        verified_events = await processor.verify_events_integrity(all_events, today)
-        logger.info(f"✅ {len(verified_events)} events passed the brutal date check")
-        
-        if not verified_events:
-            logger.error("❌ All events failed integrity check. Aborting to avoid sending wrong data.")
+        logger.info("🛡️ PASS 1.5 — Adversarial integrity check...")
+        integrity_verified = await processor.verify_events_integrity(all_events, today)
+        logger.info(f"✅ {len(integrity_verified)} events passed AI integrity check")
+
+        if not integrity_verified:
+            logger.error("❌ All events failed integrity check. Aborting.")
             return
 
         # ─────────────────────────────────────────────────────────
-        # STEP 2: Deep Ranking (Folosim lista verificată)
+        # PASS 2: Deep Ranking (top 15)
         # ─────────────────────────────────────────────────────────
-        logger.info("🔬 PASS 2 — Deep ranking: selecting top 15 most impactful...")
-        top15 = await processor.deep_rank_and_select(verified_events, today)
+        logger.info("🔬 PASS 2 — Deep ranking: selecting top 15...")
+        top15 = await processor.deep_rank_and_select(integrity_verified, today)
 
         if not top15:
             logger.warning("⚠️ Deep rank failed, falling back to raw AI scores")
-            top15 = sorted(verified_events, key=lambda x: x.get("ai_score", 0), reverse=True)[:15]
+            top15 = sorted(integrity_verified, key=lambda x: x.get("ai_score", 0), reverse=True)[:15]
 
         # ─────────────────────────────────────────────────────────
-        # STEP 3: Fetch Wikipedia pageviews
+        # PASS 2.5: Wikipedia Cross-Reference (GROUND TRUTH)
         # ─────────────────────────────────────────────────────────
-        logger.info("📊 Fetching Wikipedia pageviews for top 15...")
-        view_tasks = [scraper.fetch_page_views(item.get("slug", "")) for item in top15]
+        logger.info("📖 PASS 2.5 — Wikipedia date cross-reference (ground truth)...")
+        wiki_verified = await processor.wikipedia_date_verify(top15, today, scraper)
+        logger.info(f"✅ {len(wiki_verified)} events after Wikipedia verification")
+
+        if len(wiki_verified) < 5:
+            logger.error(f"❌ Only {len(wiki_verified)} events survived all checks. Need minimum 5.")
+            # Emergency: re-run discovery with stricter prompting
+            logger.info("🔄 Emergency re-run with stricter discovery...")
+            emergency_events = await processor.discover_events(today)
+            emergency_verified = await processor.verify_events_integrity(emergency_events, today)
+            if emergency_verified:
+                wiki_verified = await processor.wikipedia_date_verify(emergency_verified[:20], today, scraper)
+
+        if len(wiki_verified) < 5:
+            logger.error("❌ Cannot produce 5 verified events. Aborting to prevent bad data.")
+            return
+
+        # ─────────────────────────────────────────────────────────
+        # PASS 3: Wikipedia pageviews + final scoring
+        # ─────────────────────────────────────────────────────────
+        logger.info("📊 Fetching Wikipedia pageviews...")
+        view_tasks = [scraper.fetch_page_views(item.get("slug", "")) for item in wiki_verified]
         views = await asyncio.gather(*view_tasks)
 
-        # ─────────────────────────────────────────────────────────
-        # STEP 4: Scoring and Top 5
-        # ─────────────────────────────────────────────────────────
-        for idx, item in enumerate(top15):
+        for idx, item in enumerate(wiki_verified):
             item["views"] = views[idx] if isinstance(views[idx], int) else 0
             item["final_score"] = ranker.calculate_final_score(
                 ai_score=item.get("deep_score", item.get("ai_score", 50)),
@@ -139,42 +157,46 @@ async def main():
                 year=item.get("year", 0),
             )
 
-        top15.sort(key=lambda x: x.get("final_score", 0), reverse=True)
-        top5 = top15[:5]
+        wiki_verified.sort(key=lambda x: x.get("final_score", 0), reverse=True)
+        top5 = wiki_verified[:5]
 
-        # Logare Top 5 pentru debug
+        logger.info("=" * 60)
+        logger.info(f"🏆 FINAL TOP 5 for {date_str}:")
         for i, ev in enumerate(top5):
-            logger.info(f" 🏆 #{i+1} [{ev['year']}] Score: {ev['final_score']} - {ev['slug']}")
+            logger.info(f"  #{i+1} [{ev['year']}] Score: {ev['final_score']:.1f} — {ev['slug']}")
+        logger.info("=" * 60)
 
         # ─────────────────────────────────────────────────────────
-        # STEP 5: Narratives
+        # PASS 4: Generate rich narratives
         # ─────────────────────────────────────────────────────────
-        logger.info("✍️ Generating multilingual narratives...")
+        logger.info("✍️ Generating rich multilingual narratives (350-450 words each)...")
         narratives_map = await processor.generate_secondary_narratives(top5, today)
 
         # ─────────────────────────────────────────────────────────
-        # STEP 6: Media Processing
+        # PASS 5: Media processing + final payload
         # ─────────────────────────────────────────────────────────
+        logger.info("🖼️ Processing media...")
         final_events_list = []
         for idx, item in enumerate(top5):
             slug = item.get("slug", "")
             year = item.get("year", 0)
-            
-            # Curățăm titlurile și narativele de posibile valori None (pentru Pydantic)
+
             narrative_dict = narratives_map.get(f"EVENT_{idx}", {})
             for lang in ["en", "ro", "es", "de", "fr"]:
-                if lang not in narrative_dict: narrative_dict[lang] = "Narrative pending..."
-            
+                if lang not in narrative_dict:
+                    narrative_dict[lang] = "Narrative pending..."
+
             titles_dict = item.get("titles", {})
             for lang in ["en", "ro", "es", "de", "fr"]:
-                if lang not in titles_dict: titles_dict[lang] = "Event"
+                if lang not in titles_dict:
+                    titles_dict[lang] = "Event"
 
-            # Media logic...
             wiki_urls = await scraper.fetch_gallery_urls(slug, limit=3)
             gallery = []
             for i, url in enumerate(wiki_urls):
                 up_url = await safe_upload(scraper, url, f"ev_{year}_{slug[:15]}_{i}")
-                if up_url: gallery.append(up_url)
+                if up_url:
+                    gallery.append(up_url)
 
             final_events_list.append(
                 EventDetail(
@@ -191,18 +213,23 @@ async def main():
             )
 
         # ─────────────────────────────────────────────────────────
-        # STEP 8: Final Payload
+        # FINAL: Send to Java backend
         # ─────────────────────────────────────────────────────────
         payload = DailyPayload(
             date_processed=today.date(),
             events=final_events_list,
             metadata={
                 "target_date": str(today.date()),
-                "pipeline_ver": "1.5_strict"
-            }
+                "pipeline_ver": "2.0_bulletproof",
+                "events_discovered": len(all_events),
+                "events_after_integrity": len(integrity_verified),
+                "events_after_wikipedia": len(wiki_verified),
+                "events_final": len(final_events_list),
+            },
         )
 
         await send_to_java(payload)
+        logger.info("🎉 Pipeline complete!")
 
     except Exception as e:
         logger.error(f"🚨 Pipeline Crash: {e}", exc_info=True)
