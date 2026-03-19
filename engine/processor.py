@@ -236,21 +236,28 @@ CANDIDATES:
         return enriched
 
     # ══════════════════════════════════════════════════════════════
-    # PASS 2.5 — Final Wikipedia cross-reference (NEW)
+    # PASS 2.5 — Final Wikipedia cross-reference (GROUND TRUTH)
     # ══════════════════════════════════════════════════════════════
     async def wikipedia_date_verify(self, events: list, target_date: datetime, scraper) -> list:
         """
-        Cross-reference each event's date against the actual Wikipedia article.
-        Extract the first paragraph and check if the target date appears.
-        This is the GROUND TRUTH check — AI can hallucinate, Wikipedia doesn't.
+        Cross-reference each event's date against actual Wikipedia content.
+        Two verification methods:
+        1. Check the Wikipedia article text for the target date
+        2. Cross-reference against Wikipedia's "On this day" page
         """
         import httpx
+        from urllib.parse import quote
 
         date_str = self._get_target_date_str(target_date)
         month, day = self._get_month_day(target_date)
 
+        # Wikipedia requires a proper User-Agent or returns 403
+        wiki_headers = {
+            "User-Agent": "DailyHistoryApp/2.0 (https://dailyhistory.app; contact@dailyhistory.app)"
+        }
+
         # Multiple date format patterns to search for
-        month_name = target_date.strftime("%B")  # "March"
+        month_name = target_date.strftime("%B")       # "March"
         month_name_short = target_date.strftime("%b")  # "Mar"
         day_str = str(day)
         day_padded = f"{day:02d}"
@@ -263,43 +270,83 @@ CANDIDATES:
             f"{month_name_short} {day_str}",      # "Mar 19"
             f"{month_name_short}. {day_str}",     # "Mar. 19"
             f"{day_str} {month_name_short}",      # "19 Mar"
-            f"{month:02d}-{day_padded}",          # "03-19"
         ]
 
+        # ── Step A: Fetch Wikipedia's "On this day" page for ground truth slugs ──
+        otd_slugs = set()
+        otd_page_title = f"{month_name}_{day_str}"
+        otd_url = (
+            f"https://en.wikipedia.org/w/api.php"
+            f"?action=query&titles={otd_page_title}"
+            f"&prop=links&pllimit=500&format=json"
+        )
+        try:
+            async with httpx.AsyncClient(headers=wiki_headers, timeout=15.0) as client:
+                res = await client.get(otd_url)
+                if res.status_code == 200:
+                    pages = res.json().get("query", {}).get("pages", {})
+                    for page in pages.values():
+                        for link in page.get("links", []):
+                            otd_slugs.add(link.get("title", "").replace(" ", "_"))
+                    logger.info(f"📅 Wikipedia 'On this day' page has {len(otd_slugs)} linked articles")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not fetch On-This-Day page: {e}")
+
+        # ── Step B: Verify each event against Wikipedia article content ──
         async def verify_single(event: dict) -> tuple:
             slug = event.get("slug", "").replace(" ", "_")
             if not slug:
                 return event, False, "No slug"
 
+            # Quick check: is this slug linked from Wikipedia's "On this day" page?
+            slug_clean = slug.replace("_", " ")
+            otd_match = any(
+                slug_clean.lower() in otd_slug.replace("_", " ").lower()
+                or otd_slug.replace("_", " ").lower() in slug_clean.lower()
+                for otd_slug in otd_slugs
+            )
+            if otd_match:
+                return event, True, f"Found in Wikipedia 'On this day' ({month_name} {day_str})"
+
+            # Full check: fetch article content and search for date
+            encoded_slug = quote(slug, safe="")
             url = (
                 f"https://en.wikipedia.org/w/api.php"
-                f"?action=query&titles={slug}&prop=extracts"
-                f"&exintro=true&explaintext=true&format=json"
+                f"?action=query&titles={encoded_slug}&prop=extracts"
+                f"&explaintext=true&exsectionformat=plain&format=json"
             )
 
             try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
+                async with httpx.AsyncClient(headers=wiki_headers, timeout=12.0) as client:
                     res = await client.get(url)
                     if res.status_code != 200:
                         return event, False, f"HTTP {res.status_code}"
 
                     pages = res.json().get("query", {}).get("pages", {})
-                    for page in pages.values():
-                        extract = page.get("extract", "").lower()
+                    for page_id, page in pages.items():
+                        # Check for missing page
+                        if page_id == "-1" or "missing" in page:
+                            return event, False, "Article not found on Wikipedia"
+
+                        extract = page.get("extract", "")
                         if not extract or len(extract) < 50:
                             return event, False, "No extract found"
 
-                        # Check if any date pattern appears in the article intro
+                        extract_lower = extract.lower()
+
+                        # Check if any date pattern appears in the article
                         for pattern in date_patterns:
-                            if pattern.lower() in extract:
-                                return event, True, f"Found '{pattern}' in article"
+                            if pattern.lower() in extract_lower:
+                                return event, True, f"Found '{pattern}' in article text"
 
-                        # Also check for year + month pattern
+                        # Fuzzy check: year + month in same paragraph
                         year_str = str(event.get("year", ""))
-                        if year_str in extract and month_name.lower() in extract:
-                            return event, True, f"Found year {year_str} and {month_name}"
+                        paragraphs = extract_lower.split("\n")
+                        for para in paragraphs:
+                            if year_str in para and month_name.lower() in para:
+                                return event, True, f"Found year {year_str} + {month_name} in same paragraph"
 
-                        return event, False, f"Date {date_str} not found in intro"
+                        return event, False, f"Date {date_str} not found in article"
 
             except Exception as e:
                 return event, False, f"Error: {e}"
@@ -309,35 +356,30 @@ CANDIDATES:
         # Run all verifications in parallel
         results = await asyncio.gather(*[verify_single(e) for e in events])
 
-        verified = []
+        confirmed = []
+        unconfirmed = []
         for event, is_valid, reason in results:
             if is_valid:
                 logger.info(f"✅ WIKI CONFIRMED: {event['year']} {event['slug']} — {reason}")
-                verified.append(event)
+                confirmed.append(event)
             else:
                 logger.warning(f"⚠️ WIKI UNCONFIRMED: {event['year']} {event['slug']} — {reason}")
-                # Don't immediately discard — mark for AI re-verification
                 event["_wiki_unconfirmed"] = True
                 event["_wiki_reason"] = reason
-                verified.append(event)
-
-        # Separate confirmed vs unconfirmed
-        confirmed = [e for e in verified if not e.get("_wiki_unconfirmed")]
-        unconfirmed = [e for e in verified if e.get("_wiki_unconfirmed")]
+                unconfirmed.append(event)
 
         logger.info(
             f"📊 Wikipedia verification: {len(confirmed)} confirmed, {len(unconfirmed)} unconfirmed"
         )
 
-        # If we have enough confirmed events (>= 8), drop unconfirmed
+        # If we have enough confirmed events (>= 8), drop unconfirmed entirely
         if len(confirmed) >= 8:
             logger.info(f"✅ Enough confirmed events — dropping {len(unconfirmed)} unconfirmed")
             return confirmed
 
-        # Otherwise keep unconfirmed but prioritize confirmed in scoring
+        # Otherwise keep unconfirmed but heavily penalize their scores
         for e in unconfirmed:
-            e["deep_score"] = e.get("deep_score", 50) * 0.7  # Penalty
-            # Clean up temp fields
+            e["deep_score"] = e.get("deep_score", 50) * 0.5  # 50% penalty
             e.pop("_wiki_unconfirmed", None)
             e.pop("_wiki_reason", None)
 
