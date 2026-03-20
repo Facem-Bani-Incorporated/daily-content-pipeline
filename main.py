@@ -11,6 +11,7 @@ from core.logger import setup_logger
 from core.config import config
 from engine.scraper import WikiScraper
 from engine.processor import AIProcessor
+from engine.quiz_generator import QuizGenerator
 from engine.ranker import ScoringEngine
 from schema.models import DailyPayload, EventDetail, EventCategory, Translations
 
@@ -23,7 +24,7 @@ async def send_to_java(payload: DailyPayload):
 
     events_final = []
     for ev in payload.events:
-        events_final.append({
+        ev_dict = {
             "category": ev.category.value,
             "titleTranslations": ev.title_translations.model_dump(),
             "narrativeTranslations": ev.narrative_translations.model_dump(),
@@ -32,7 +33,26 @@ async def send_to_java(payload: DailyPayload):
             "sourceUrl": str(ev.source_url),
             "pageViews30d": int(ev.page_views_30d),
             "gallery": ev.gallery if ev.gallery else [],
-        })
+        }
+
+        # Add quiz if present
+        if ev.quiz:
+            quiz_dict = {}
+            for lang in ["en", "ro", "es", "de", "fr"]:
+                lang_questions = getattr(ev.quiz, lang, [])
+                quiz_dict[lang] = [
+                    {
+                        "id": q.id,
+                        "question": q.question,
+                        "options": [{"id": o.id, "text": o.text} for o in q.options],
+                        "correctId": q.correct_id,
+                        "explanation": q.explanation,
+                    }
+                    for q in lang_questions
+                ]
+            ev_dict["quiz"] = quiz_dict
+
+        events_final.append(ev_dict)
 
     payload_to_serialize = {
         "dateProcessed": payload.date_processed.isoformat(),
@@ -79,76 +99,49 @@ async def safe_upload(scraper: WikiScraper, url: str, public_id: str):
 
 
 async def main():
-    logger.info("🚀 Starting Pipeline (6-pass: AI → Integrity → Rank → Wikipedia → Narratives → Verify)")
+    logger.info("🚀 Starting Pipeline for TOMORROW's events (AI-driven, 60→15→5)...")
 
     scraper = WikiScraper()
     processor = AIProcessor()
+    quiz_gen = QuizGenerator()
     ranker = ScoringEngine()
 
     today = datetime.now()
-    date_str = today.strftime("%B %d")
 
     try:
         # ─────────────────────────────────────────────────────────
-        # PASS 1: AI Discovery (wide net)
+        # STEP 1: AI casts a wide net — 60 events for today's date
         # ─────────────────────────────────────────────────────────
-        logger.info(f"🌐 PASS 1 — Discovering events for {date_str}...")
+        logger.info(f"🌐 PASS 1 — Discovering 60 events for {today.strftime('%B %d')}...")
         all_events = await processor.discover_events(today)
-        logger.info(f"📋 Got {len(all_events)} high-confidence events from AI")
+        logger.info(f"📋 Got {len(all_events)} validated events from AI")
 
         if not all_events:
             logger.error("❌ AI returned no events. Aborting.")
             return
 
         # ─────────────────────────────────────────────────────────
-        # PASS 1.5: AI Integrity Check (adversarial)
+        # STEP 2: AI deep-ranks and selects top 15 globally important
         # ─────────────────────────────────────────────────────────
-        logger.info("🛡️ PASS 1.5 — Adversarial integrity check...")
-        integrity_verified = await processor.verify_events_integrity(all_events, today)
-        logger.info(f"✅ {len(integrity_verified)} events passed AI integrity check")
-
-        if not integrity_verified:
-            logger.error("❌ All events failed integrity check. Aborting.")
-            return
-
-        # ─────────────────────────────────────────────────────────
-        # PASS 2: Deep Ranking (top 15)
-        # ─────────────────────────────────────────────────────────
-        logger.info("🔬 PASS 2 — Deep ranking: selecting top 15...")
-        top15 = await processor.deep_rank_and_select(integrity_verified, today)
+        logger.info("🔬 PASS 2 — Deep ranking: selecting top 15 most globally impactful...")
+        top15 = await processor.deep_rank_and_select(all_events, today)
+        logger.info(f"🏅 Deep rank returned {len(top15)} enriched events")
 
         if not top15:
             logger.warning("⚠️ Deep rank failed, falling back to raw AI scores")
-            top15 = sorted(integrity_verified, key=lambda x: x.get("ai_score", 0), reverse=True)[:15]
+            top15 = sorted(all_events, key=lambda x: x.get("ai_score", 0), reverse=True)[:15]
 
         # ─────────────────────────────────────────────────────────
-        # PASS 2.5: Wikipedia Cross-Reference (GROUND TRUTH)
+        # STEP 3: Fetch Wikipedia pageviews in parallel for top 15
         # ─────────────────────────────────────────────────────────
-        logger.info("📖 PASS 2.5 — Wikipedia date cross-reference (ground truth)...")
-        wiki_verified = await processor.wikipedia_date_verify(top15, today, scraper)
-        logger.info(f"✅ {len(wiki_verified)} events after Wikipedia verification")
-
-        if len(wiki_verified) < 5:
-            logger.error(f"❌ Only {len(wiki_verified)} events survived all checks. Need minimum 5.")
-            # Emergency: re-run discovery with stricter prompting
-            logger.info("🔄 Emergency re-run with stricter discovery...")
-            emergency_events = await processor.discover_events(today)
-            emergency_verified = await processor.verify_events_integrity(emergency_events, today)
-            if emergency_verified:
-                wiki_verified = await processor.wikipedia_date_verify(emergency_verified[:20], today, scraper)
-
-        if len(wiki_verified) < 5:
-            logger.error("❌ Cannot produce 5 verified events. Aborting to prevent bad data.")
-            return
-
-        # ─────────────────────────────────────────────────────────
-        # PASS 3: Wikipedia pageviews + final scoring
-        # ─────────────────────────────────────────────────────────
-        logger.info("📊 Fetching Wikipedia pageviews...")
-        view_tasks = [scraper.fetch_page_views(item.get("slug", "")) for item in wiki_verified]
+        logger.info("📊 Fetching Wikipedia pageviews for top 15...")
+        view_tasks = [scraper.fetch_page_views(item.get("slug", "")) for item in top15]
         views = await asyncio.gather(*view_tasks)
 
-        for idx, item in enumerate(wiki_verified):
+        # ─────────────────────────────────────────────────────────
+        # STEP 4: Calculate final scores and select top 5
+        # ─────────────────────────────────────────────────────────
+        for idx, item in enumerate(top15):
             item["views"] = views[idx] if isinstance(views[idx], int) else 0
             item["final_score"] = ranker.calculate_final_score(
                 ai_score=item.get("deep_score", item.get("ai_score", 50)),
@@ -157,91 +150,146 @@ async def main():
                 year=item.get("year", 0),
             )
 
-        wiki_verified.sort(key=lambda x: x.get("final_score", 0), reverse=True)
-        top5 = wiki_verified[:5]
+        top15.sort(key=lambda x: x.get("final_score", 0), reverse=True)
+        top5 = top15[:5]
 
-        logger.info("=" * 60)
-        logger.info(f"🏆 FINAL TOP 5 for {date_str}:")
+        logger.info("🏆 FINAL TOP 5:")
         for i, ev in enumerate(top5):
-            logger.info(f"  #{i+1} [{ev['year']}] Score: {ev['final_score']:.1f} — {ev['slug']}")
-        logger.info("=" * 60)
+            breakdown = ev.get("score_breakdown", {})
+            logger.info(
+                f"  {i+1}. [{ev['year']}] {ev['text'][:80]}\n"
+                f"      → final={ev['final_score']} | deep={ev.get('deep_score','?')} | "
+                f"views={ev['views']} | breakdown={breakdown}"
+            )
 
         # ─────────────────────────────────────────────────────────
-        # PASS 3.5: Verify & fix titles (all 5 languages)
+        # STEP 5: Generate multilingual narratives for top 5
         # ─────────────────────────────────────────────────────────
-        logger.info("🏷️ PASS 3.5 — Verifying title translations (5 languages)...")
-        top5 = await processor.verify_and_fix_titles(top5)
-
-        # ─────────────────────────────────────────────────────────
-        # PASS 4: Generate rich narratives (bulletproof multilingual)
-        # ─────────────────────────────────────────────────────────
-        logger.info("✍️ PASS 4 — Generating bulletproof multilingual narratives...")
-        logger.info("  → Unique opening technique per event")
-        logger.info("  → Up to 3 retries per language")
-        logger.info("  → Fallback translation from EN if direct generation fails")
-        logger.info("  → Final validation: no placeholder text ships")
+        logger.info("✍️ Generating multilingual narratives for top 5...")
         narratives_map = await processor.generate_secondary_narratives(top5, today)
 
         # ─────────────────────────────────────────────────────────
-        # PASS 5: Media processing + final payload
+        # STEP 5.5: Generate quizzes for top 5 (parallel with images)
         # ─────────────────────────────────────────────────────────
-        logger.info("🖼️ Processing media...")
+        logger.info("🧠 Generating quizzes for top 5 events...")
+        quizzes = await quiz_gen.generate_quizzes(top5, narratives_map)
+
+        quiz_ok = sum(1 for q in quizzes if q is not None)
+        logger.info(f"✅ Quizzes generated: {quiz_ok}/{len(top5)} successful")
+
+        # ─────────────────────────────────────────────────────────
+        # STEP 6: Fetch & upload images using AI-provided wiki slugs
+        # ─────────────────────────────────────────────────────────
         final_events_list = []
+
         for idx, item in enumerate(top5):
             slug = item.get("slug", "")
             year = item.get("year", 0)
+            slug_display = slug.replace("_", " ")
 
-            narrative_dict = narratives_map.get(f"EVENT_{idx}", {})
-            # Final safety: ensure all languages present
-            for lang in ["en", "ro", "es", "de", "fr"]:
-                if lang not in narrative_dict or not narrative_dict[lang]:
-                    logger.error(f"🚨 FINAL SAFETY NET: {idx}:{lang} still missing!")
-                    narrative_dict[lang] = narrative_dict.get("en", "Narrative unavailable.")
+            logger.info(f"🖼️ Fetching images for: {slug_display}")
 
-            titles_dict = item.get("titles", {})
-            for lang in ["en", "ro", "es", "de", "fr"]:
-                if lang not in titles_dict or not titles_dict[lang]:
-                    titles_dict[lang] = titles_dict.get("en", "Event")
+            # Hero image from Pexels
+            hero_url = await scraper.fetch_pro_image(slug_display)
 
+            # Gallery from the exact Wikipedia article AI specified
             wiki_urls = await scraper.fetch_gallery_urls(slug, limit=3)
+
+            # Merge: hero first, then wiki, no duplicates, no GIFs
+            combined_sources = []
+            seen_urls: set = set()
+
+            if hero_url:
+                combined_sources.append(hero_url)
+                seen_urls.add(hero_url)
+
+            for w_url in wiki_urls:
+                if len(combined_sources) >= 3:
+                    break
+                if w_url not in seen_urls and ".gif" not in w_url.lower():
+                    combined_sources.append(w_url)
+                    seen_urls.add(w_url)
+
+            # Upload to Cloudinary
             gallery = []
-            for i, url in enumerate(wiki_urls):
-                up_url = await safe_upload(scraper, url, f"ev_{year}_{slug[:15]}_{i}")
-                if up_url:
-                    gallery.append(up_url)
+            for i, url in enumerate(combined_sources):
+                img_url = await safe_upload(scraper, url, f"ev_{year}_{slug[:20]}_{i}")
+                if img_url:
+                    gallery.append(img_url)
+                await asyncio.sleep(0.5)
+
+            # Fallback to wiki_thumb if gallery is empty
+            if not gallery and item.get("wiki_thumb"):
+                fb = await safe_upload(scraper, item["wiki_thumb"], f"ev_{year}_{slug[:20]}_fb")
+                gallery = [fb] if fb else []
+
+            # ─────────────────────────────────────────────────────
+            # STEP 7: Assemble EventDetail
+            # ─────────────────────────────────────────────────────
+            narrative_data = narratives_map.get(f"EVENT_{idx}", {})
+            titles = item.get("titles", {lang: "Historical Event" for lang in ["en", "ro", "es", "de", "fr"]})
+
+            # Get quiz for this event (may be None if generation failed)
+            event_quiz = quizzes[idx] if idx < len(quizzes) else None
 
             final_events_list.append(
                 EventDetail(
                     category=EventCategory(item["category"].lower()),
                     year=year,
-                    event_date=datetime(year, today.month, today.day).date(),
+                    event_date=today.date(),
                     source_url=f"https://en.wikipedia.org/wiki/{slug}",
-                    title_translations=Translations(**titles_dict),
-                    narrative_translations=Translations(**narrative_dict),
+                    title_translations=Translations(**titles),
+                    narrative_translations=Translations(**narrative_data),
                     impact_score=float(item["final_score"]),
                     page_views_30d=item["views"],
                     gallery=gallery,
+                    quiz=event_quiz,
                 )
             )
 
         # ─────────────────────────────────────────────────────────
-        # FINAL: Send to Java backend
+        # STEP 8: Log full payload (visible in Railway even if Java rejects it)
         # ─────────────────────────────────────────────────────────
         payload = DailyPayload(
             date_processed=today.date(),
             events=final_events_list,
             metadata={
+                "total_discovered": len(all_events),
+                "after_deep_rank": len(top15),
+                "final_selected": len(final_events_list),
+                "quizzes_generated": quiz_ok,
                 "target_date": str(today.date()),
-                "pipeline_ver": "3.0_bulletproof_narratives",
-                "events_discovered": len(all_events),
-                "events_after_integrity": len(integrity_verified),
-                "events_after_wikipedia": len(wiki_verified),
-                "events_final": len(final_events_list),
+                "pipeline": "ai_driven_60_to_5_v4_with_quiz",
             },
         )
 
+        # Dump complete JSON to stdout — always visible in Railway logs
+        logger.info("═" * 60)
+        logger.info("📋 FULL PAYLOAD DUMP (copy this for Spring Boot dev):")
+        logger.info("═" * 60)
+        try:
+            full_json = payload.model_dump_json(by_alias=True, indent=2)
+            # Print in chunks so Railway doesn't truncate
+            lines = full_json.split("\n")
+            for line in lines:
+                print(line)
+        except Exception as dump_err:
+            logger.warning(f"Could not dump full JSON: {dump_err}")
+        logger.info("═" * 60)
+
+        # Log quiz summary per event
+        for i, ev in enumerate(final_events_list):
+            title = ev.title_translations.en[:60]
+            has_quiz = "✅" if ev.quiz else "❌"
+            q_count = 0
+            if ev.quiz:
+                q_count = len(ev.quiz.en)
+            logger.info(f"  Event {i+1}: {has_quiz} quiz ({q_count}q) — {title}")
+
+        # ─────────────────────────────────────────────────────────
+        # STEP 9: Send to Java backend (may fail if backend not ready)
+        # ─────────────────────────────────────────────────────────
         await send_to_java(payload)
-        logger.info("🎉 Pipeline complete!")
 
     except Exception as e:
         logger.error(f"🚨 Pipeline Crash: {e}", exc_info=True)
