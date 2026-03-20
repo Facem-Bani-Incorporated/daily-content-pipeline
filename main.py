@@ -79,7 +79,7 @@ async def safe_upload(scraper: WikiScraper, url: str, public_id: str):
 
 
 async def main():
-    logger.info("🚀 Starting Pipeline (5-pass verification: AI → Integrity → Rank → Wikipedia → Final)")
+    logger.info("🚀 Starting Pipeline (6-pass: AI → Integrity → Rank → Wikipedia → Narratives → Verify)")
 
     scraper = WikiScraper()
     processor = AIProcessor()
@@ -167,9 +167,19 @@ async def main():
         logger.info("=" * 60)
 
         # ─────────────────────────────────────────────────────────
-        # PASS 4: Generate rich narratives
+        # PASS 3.5: Verify & fix titles (all 5 languages)
         # ─────────────────────────────────────────────────────────
-        logger.info("✍️ Generating rich multilingual narratives (350-450 words each)...")
+        logger.info("🏷️ PASS 3.5 — Verifying title translations (5 languages)...")
+        top5 = await processor.verify_and_fix_titles(top5)
+
+        # ─────────────────────────────────────────────────────────
+        # PASS 4: Generate rich narratives (bulletproof multilingual)
+        # ─────────────────────────────────────────────────────────
+        logger.info("✍️ PASS 4 — Generating bulletproof multilingual narratives...")
+        logger.info("  → Unique opening technique per event")
+        logger.info("  → Up to 3 retries per language")
+        logger.info("  → Fallback translation from EN if direct generation fails")
+        logger.info("  → Final validation: no placeholder text ships")
         narratives_map = await processor.generate_secondary_narratives(top5, today)
 
         # ─────────────────────────────────────────────────────────
@@ -182,14 +192,16 @@ async def main():
             year = item.get("year", 0)
 
             narrative_dict = narratives_map.get(f"EVENT_{idx}", {})
+            # Final safety: ensure all languages present
             for lang in ["en", "ro", "es", "de", "fr"]:
-                if lang not in narrative_dict:
-                    narrative_dict[lang] = "Narrative pending..."
+                if lang not in narrative_dict or not narrative_dict[lang]:
+                    logger.error(f"🚨 FINAL SAFETY NET: {idx}:{lang} still missing!")
+                    narrative_dict[lang] = narrative_dict.get("en", "Narrative unavailable.")
 
             titles_dict = item.get("titles", {})
             for lang in ["en", "ro", "es", "de", "fr"]:
-                if lang not in titles_dict:
-                    titles_dict[lang] = "Event"
+                if lang not in titles_dict or not titles_dict[lang]:
+                    titles_dict[lang] = titles_dict.get("en", "Event")
 
             wiki_urls = await scraper.fetch_gallery_urls(slug, limit=3)
             gallery = []
@@ -220,7 +232,7 @@ async def main():
             events=final_events_list,
             metadata={
                 "target_date": str(today.date()),
-                "pipeline_ver": "2.0_bulletproof",
+                "pipeline_ver": "3.0_bulletproof_narratives",
                 "events_discovered": len(all_events),
                 "events_after_integrity": len(integrity_verified),
                 "events_after_wikipedia": len(wiki_verified),

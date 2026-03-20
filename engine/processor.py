@@ -17,6 +17,61 @@ class AIProcessor:
         self.categories_list = [c.value for c in EventCategory]
         self.languages = ["en", "ro", "es", "de", "fr"]
 
+        # ══════════════════════════════════════════════════════════
+        # 12 distinct narrative opening techniques — rotated per event
+        # to guarantee no two stories in the same batch start alike
+        # ══════════════════════════════════════════════════════════
+        self.opening_techniques = [
+            {
+                "name": "SENSORY_IMMERSION",
+                "instruction": "Open with a vivid sensory detail — a sound, smell, texture, or visual that places the reader physically in that moment. Example style: 'The acrid smell of gunpowder hung low over the valley as...'",
+            },
+            {
+                "name": "DIALOGUE_OR_QUOTE",
+                "instruction": "Open with a powerful real quote or documented words spoken by a key figure in the event. If no verified quote exists, open with a documented reaction or proclamation. Example style: '\"We shall never surrender,\" echoed through the chamber as...'",
+            },
+            {
+                "name": "COUNTDOWN_TENSION",
+                "instruction": "Open by establishing urgency — a ticking clock, a deadline, a moment where everything hung in the balance. Example style: 'With less than twelve hours before the deadline expired, negotiators in Geneva faced an impossible choice...'",
+            },
+            {
+                "name": "WIDE_TO_NARROW_ZOOM",
+                "instruction": "Open with a panoramic, almost cinematic wide shot of the setting, then zoom into the specific human moment. Example style: 'Across the frozen plains of Eastern Europe, columns of smoke marked the advance of armies — but in one small farmhouse on the outskirts of...'",
+            },
+            {
+                "name": "CONTRAST_JUXTAPOSITION",
+                "instruction": "Open by contrasting the ordinary with the extraordinary — what normal life looked like vs. what was about to change. Example style: 'Shopkeepers in downtown Dallas were arranging their morning displays, unaware that within the hour...'",
+            },
+            {
+                "name": "AFTERMATH_FLASHBACK",
+                "instruction": "Open with the aftermath or consequence FIRST, then rewind to explain how it happened. Example style: 'When the dust finally settled, the map of Europe had been redrawn forever. It had all begun just hours earlier when...'",
+            },
+            {
+                "name": "HUMAN_PORTRAIT",
+                "instruction": "Open by focusing on a single person — their age, their role, what they were doing at that exact moment. Make the reader care about a human before revealing the larger event. Example style: 'Maria Kowalski, a 34-year-old radio operator, was halfway through her night shift when the transmission came through...'",
+            },
+            {
+                "name": "GEOGRAPHIC_STORYTELLING",
+                "instruction": "Open by painting the geographic/physical setting as almost a character in the story — the terrain, the weather, the architecture. Example style: 'The narrow strait between the two continents had witnessed empires rise and fall for millennia, but on this particular morning...'",
+            },
+            {
+                "name": "STATISTICAL_SHOCK",
+                "instruction": "Open with a striking number or statistic that immediately conveys scale. Example style: 'In the span of forty-eight seconds, an earthquake measuring 7.8 on the Richter scale reduced a city of two million to rubble...'",
+            },
+            {
+                "name": "QUESTION_HOOK",
+                "instruction": "Open with a thought-provoking rhetorical question that draws the reader in. Example style: 'What happens when a single signature on a single document changes the fate of an entire continent?'",
+            },
+            {
+                "name": "IRONIC_FORESHADOWING",
+                "instruction": "Open with dramatic irony — something that seemed insignificant at the time but turned out to be world-changing. Example style: 'The memo was only three pages long, stamped \"routine\" by the clerk who filed it. Within a year, it would topple a government...'",
+            },
+            {
+                "name": "PARALLEL_WORLDS",
+                "instruction": "Open by showing two different places or groups of people simultaneously — what was happening on both sides. Example style: 'In Washington, the president paced the Oval Office floor. Six thousand miles away in Moscow, his counterpart stared at the same intelligence report...'",
+            },
+        ]
+
     def _get_target_date_str(self, target_date: datetime) -> str:
         return target_date.strftime("%B %d")
 
@@ -390,62 +445,418 @@ CANDIDATES:
         return confirmed + unconfirmed
 
     # ══════════════════════════════════════════════════════════════
-    # NARRATIVES — Longer, storytelling style
+    # NARRATIVES — Bulletproof multilingual storytelling
     # ══════════════════════════════════════════════════════════════
-    async def generate_secondary_narratives(self, top_events: list, target_date: datetime):
+    async def generate_secondary_narratives(self, top_events: list, target_date: datetime) -> dict:
+        """
+        Generate rich narratives for each event in all 5 languages.
+        
+        Bulletproof guarantees:
+        1. Each event gets a UNIQUE opening technique (no two stories start alike)
+        2. Every language is generated independently with retries
+        3. Failed languages get a fallback translation from English
+        4. Final validation ensures no placeholder text ships
+        """
         date_str = self._get_target_date_str(target_date)
 
-        async def process_single(idx, item):
-            tasks = [
-                self._fetch_narrative_lang(idx, item, lang, date_str) for lang in self.languages
-            ]
-            return f"EVENT_{idx}", dict(await asyncio.gather(*tasks))
+        # ── Step 1: Assign unique opening techniques to each event ──
+        technique_assignments = self._assign_opening_techniques(len(top_events))
+        for idx, item in enumerate(top_events):
+            technique = technique_assignments[idx]
+            logger.info(f"🎭 Event {idx} ({item.get('slug', '')[:30]}) → {technique['name']}")
 
-        return dict(
+        # ── Step 2: Generate all narratives in parallel ──
+        async def process_single(idx, item):
+            technique = technique_assignments[idx]
+            lang_results = await asyncio.gather(*[
+                self._fetch_narrative_lang_bulletproof(idx, item, lang, date_str, technique)
+                for lang in self.languages
+            ])
+            return f"EVENT_{idx}", dict(lang_results)
+
+        results = dict(
             await asyncio.gather(*[process_single(i, item) for i, item in enumerate(top_events)])
         )
 
-    async def _fetch_narrative_lang(self, idx, item, lang, date_str):
+        # ── Step 3: Verify & patch — no event ships with broken translations ──
+        results = await self._verify_and_patch_narratives(results, top_events, date_str, technique_assignments)
+
+        # ── Step 4: Anti-repetition audit across all events ──
+        self._audit_opening_diversity(results)
+
+        return results
+
+    def _assign_opening_techniques(self, count: int) -> list:
+        """
+        Assign a unique opening technique to each event.
+        Shuffles techniques so that even across days, patterns vary.
+        """
+        import random
+        import hashlib
+        from datetime import datetime
+
+        # Seed shuffle with today's date so it's deterministic per day
+        # but different across days
+        day_seed = datetime.now().strftime("%Y-%m-%d")
+        seed = int(hashlib.md5(day_seed.encode()).hexdigest()[:8], 16)
+        rng = random.Random(seed)
+
+        pool = list(self.opening_techniques)
+        rng.shuffle(pool)
+
+        # If we need more techniques than available, cycle through
+        assignments = []
+        for i in range(count):
+            assignments.append(pool[i % len(pool)])
+
+        return assignments
+
+    async def _fetch_narrative_lang_bulletproof(
+        self, idx: int, item: dict, lang: str, date_str: str, technique: dict
+    ) -> tuple:
+        """
+        Generate a single narrative for one event in one language.
+        Includes retry logic (up to 3 attempts) and quality validation.
+        """
+        max_retries = 3
         year = item.get("year", "")
         text = item.get("text", "")
         slug = item.get("slug", "")
 
-        prompt = f"""
+        lang_names = {
+            "en": "English",
+            "ro": "Romanian",
+            "es": "Spanish",
+            "de": "German",
+            "fr": "French",
+        }
+        lang_full = lang_names.get(lang, lang.upper())
+
+        for attempt in range(1, max_retries + 1):
+            prompt = f"""
 You are an award-winning historical storyteller writing for a premium mobile app.
-Write a compelling narrative in {lang.upper()} about this event:
+Write a compelling narrative in **{lang_full} ({lang.upper()})** about this event:
 
 EVENT: {year} — {text}
 WIKIPEDIA ARTICLE: {slug}
 DATE: {date_str}
 
+═══════════════════════════════════════════════
+MANDATORY OPENING TECHNIQUE: {technique['name']}
+{technique['instruction']}
+═══════════════════════════════════════════════
+
 WRITING RULES:
 1. LENGTH: Write 350-450 words. This must feel substantial, not like a blurb.
-2. OPENING: Start with a vivid, cinematic scene-setting sentence that transports the reader to that moment.
-   - BAD: "On {date_str}, {year}, an important event occurred."
-   - GOOD: "The morning air in [city] was thick with tension as..."
+2. OPENING: You MUST use the {technique['name']} technique described above.
+   — FORBIDDEN OPENINGS (do NOT start with any of these patterns):
+     • "On [date], [year], ..."
+     • "In [year], on [date], ..."  
+     • "[Date], [year] marked..."
+     • "The date was [date], [year]..."
+     • "It was [date], [year] when..."
+     • Any variant that leads with the raw date as the first words.
+   — The date MUST appear in the narrative, but NOT as the opening words.
 3. STRUCTURE: Follow this arc:
-   - Hook (1-2 sentences): Set the scene dramatically
+   - Hook (1-2 sentences): Using the {technique['name']} technique
    - Context (2-3 sentences): What led to this moment?
    - The Event (3-5 sentences): What exactly happened? Be specific with names, places, numbers.
    - Immediate Impact (2-3 sentences): What changed right after?
    - Legacy (2-3 sentences): Why does this still matter today?
-4. TONE: Authoritative but engaging. Like a top documentary narrator — not dry, not sensational.
-5. FACTS: Only include verified facts. Do not invent quotes or dialogue.
-6. DATE ANCHOR: The narrative must clearly establish this happened on {date_str}, {year}.
+4. LANGUAGE: Write the ENTIRE narrative in {lang_full}. Not a single sentence in another language.
+5. TONE: Authoritative but engaging. Like a top documentary narrator — not dry, not sensational.
+6. FACTS: Only include verified facts. Do not invent quotes unless using documented historical words.
+7. DATE ANCHOR: The narrative must clearly establish this happened on {date_str}, {year} — but woven naturally into the text, not as the opening line.
+
+QUALITY CHECKLIST before submitting:
+- [ ] Is the entire text in {lang_full}? (Not English, not mixed)
+- [ ] Does it use the {technique['name']} opening technique?
+- [ ] Does it NOT start with "On {date_str}" or "In {year}"?
+- [ ] Is it between 350-450 words?
+- [ ] Does it mention the specific date {date_str}, {year} somewhere?
 
 Return JSON: {{ "content": "your narrative here" }}
 """
 
+            res = await self._safe_groq_call(
+                prompt,
+                f"Narrative {idx}:{lang} (attempt {attempt})",
+                {"content": ""},
+            )
+            content = res.get("content", "")
+
+            # ── Quality gate ──
+            is_valid, reason = self._validate_narrative(content, lang, technique)
+            if is_valid:
+                logger.info(f"✅ Narrative {idx}:{lang} — passed quality gate (attempt {attempt})")
+                return lang, content
+            else:
+                logger.warning(
+                    f"⚠️ Narrative {idx}:{lang} failed quality gate (attempt {attempt}): {reason}"
+                )
+
+        # All retries exhausted — return whatever we got, will be patched later
+        logger.error(f"🚨 Narrative {idx}:{lang} — all {max_retries} attempts failed")
+        return lang, content if content else ""
+
+    def _validate_narrative(self, content: str, lang: str, technique: dict) -> tuple:
+        """
+        Validate a narrative meets quality standards.
+        Returns (is_valid: bool, reason: str).
+        """
+        if not content or len(content.strip()) < 50:
+            return False, "Content is empty or too short"
+
+        word_count = len(content.split())
+
+        # Must be at least 150 words (generous minimum to account for language differences)
+        if word_count < 150:
+            return False, f"Too short: {word_count} words (minimum 150)"
+
+        # Check for placeholder / error content
+        bad_markers = [
+            "narrative pending",
+            "content pending",
+            "error generating",
+            "i apologize",
+            "i'm sorry",
+            "as an ai",
+            "i cannot",
+        ]
+        content_lower = content.lower()
+        for marker in bad_markers:
+            if marker in content_lower:
+                return False, f"Contains placeholder/error text: '{marker}'"
+
+        # Check it's not in English when it should be another language
+        if lang != "en":
+            # Simple heuristic: check for common English-only words that rarely appear in other languages
+            english_giveaways = ["the ", "and ", "was ", "were ", "this ", "that ", "with ", "from "]
+            english_word_count = sum(1 for word in english_giveaways if word in content_lower)
+            total_ratio = english_word_count / max(len(english_giveaways), 1)
+            if total_ratio > 0.8:
+                return False, f"Appears to be in English instead of {lang} (english ratio: {total_ratio:.0%})"
+
+        # Check it doesn't start with a raw date pattern
+        first_30 = content[:30].lower().strip()
+        date_openers = ["on ", "in ", "the date"]
+        # Only flag if it starts with these AND immediately has a month/year
+        for opener in date_openers:
+            if first_30.startswith(opener):
+                # Check if a month name follows within first 40 chars
+                months = [
+                    "january", "february", "march", "april", "may", "june",
+                    "july", "august", "september", "october", "november", "december",
+                    "enero", "febrero", "marzo", "abril", "mayo", "junio",
+                    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+                    "januar", "februar", "märz", "april", "mai", "juni",
+                    "juli", "august", "september", "oktober", "november", "dezember",
+                    "ianuarie", "februarie", "martie", "aprilie", "mai", "iunie",
+                    "iulie", "august", "septembrie", "octombrie", "noiembrie", "decembrie",
+                    "janvier", "février", "mars", "avril", "mai", "juin",
+                    "juillet", "août", "septembre", "octobre", "novembre", "décembre",
+                ]
+                first_60 = content[:60].lower()
+                if any(m in first_60 for m in months):
+                    return False, f"Starts with boring date opener: '{content[:40]}...'"
+
+        return True, "OK"
+
+    async def _verify_and_patch_narratives(
+        self, results: dict, top_events: list, date_str: str, technique_assignments: list
+    ) -> dict:
+        """
+        Final verification pass: ensure every event has all 5 languages.
+        Missing/broken languages get patched via translation from English.
+        """
+        patch_tasks = []
+
+        for idx, item in enumerate(top_events):
+            event_key = f"EVENT_{idx}"
+            narratives = results.get(event_key, {})
+
+            # Ensure English exists first (it's our fallback source)
+            en_content = narratives.get("en", "")
+            if not en_content or len(en_content.split()) < 100:
+                logger.error(f"🚨 Event {idx}: English narrative is missing/broken — regenerating")
+                patch_tasks.append(
+                    self._emergency_regenerate(idx, item, "en", date_str, technique_assignments[idx], results)
+                )
+
+            # Check each non-English language
+            for lang in ["ro", "es", "de", "fr"]:
+                content = narratives.get(lang, "")
+                is_valid, reason = self._validate_narrative(
+                    content, lang, technique_assignments[idx]
+                )
+                if not is_valid:
+                    logger.warning(f"⚠️ Event {idx}:{lang} failed final check: {reason} — patching")
+                    patch_tasks.append(
+                        self._patch_from_english(idx, lang, date_str, results)
+                    )
+
+        if patch_tasks:
+            logger.info(f"🔧 Patching {len(patch_tasks)} broken narrative(s)...")
+            await asyncio.gather(*patch_tasks)
+
+        # Final safety net: fill any still-missing with explicit marker
+        for idx in range(len(top_events)):
+            event_key = f"EVENT_{idx}"
+            if event_key not in results:
+                results[event_key] = {}
+            for lang in self.languages:
+                if not results[event_key].get(lang) or len(results[event_key][lang].strip()) < 50:
+                    logger.error(f"🚨 CRITICAL: Event {idx}:{lang} still missing after patching!")
+                    results[event_key][lang] = results[event_key].get("en", "Narrative unavailable.")
+
+        return results
+
+    async def _emergency_regenerate(
+        self, idx: int, item: dict, lang: str, date_str: str, technique: dict, results: dict
+    ):
+        """Emergency regeneration of a narrative from scratch."""
+        _, content = await self._fetch_narrative_lang_bulletproof(idx, item, lang, date_str, technique)
+        event_key = f"EVENT_{idx}"
+        if event_key not in results:
+            results[event_key] = {}
+        results[event_key][lang] = content
+
+    async def _patch_from_english(self, idx: int, target_lang: str, date_str: str, results: dict):
+        """
+        Translate the English narrative into the target language.
+        Used as a fallback when direct generation failed.
+        """
+        event_key = f"EVENT_{idx}"
+        en_content = results.get(event_key, {}).get("en", "")
+        if not en_content or len(en_content.split()) < 100:
+            logger.error(f"🚨 Cannot patch {idx}:{target_lang} — English source also broken")
+            return
+
+        lang_names = {
+            "ro": "Romanian",
+            "es": "Spanish",
+            "de": "German",
+            "fr": "French",
+        }
+        lang_full = lang_names.get(target_lang, target_lang.upper())
+
+        prompt = f"""
+You are a professional literary translator specializing in historical content.
+Translate the following English historical narrative into {lang_full}.
+
+TRANSLATION RULES:
+1. Preserve the storytelling tone, structure, and emotional impact.
+2. Do NOT add or remove information — translate faithfully.
+3. Use natural, fluent {lang_full} — not word-for-word translation.
+4. Keep proper nouns (names, places) in their commonly used {lang_full} forms.
+5. The entire output must be in {lang_full}. Zero English words except proper nouns.
+
+ENGLISH ORIGINAL:
+{en_content}
+
+Return JSON: {{ "content": "translated narrative in {lang_full}" }}
+"""
+
         res = await self._safe_groq_call(
-            prompt, f"Narrative {idx}:{lang}", {"content": "Narrative pending..."}
+            prompt, f"Translation patch {idx}:{target_lang}", {"content": ""}
         )
-        content = res.get("content", "Narrative pending...")
+        translated = res.get("content", "")
 
-        # Validate minimum length
-        if len(content.split()) < 150:
-            logger.warning(f"⚠️ Short narrative for event {idx} ({lang}): {len(content.split())} words")
+        if translated and len(translated.split()) >= 100:
+            results[event_key][target_lang] = translated
+            logger.info(f"✅ Patched {idx}:{target_lang} via English translation")
+        else:
+            # Last resort: use English
+            results[event_key][target_lang] = en_content
+            logger.warning(f"⚠️ Translation patch failed for {idx}:{target_lang} — using English fallback")
 
-        return lang, content
+    def _audit_opening_diversity(self, results: dict):
+        """
+        Log the first 15 words of each English narrative to verify
+        they don't all start the same way.
+        """
+        logger.info("🔍 Opening diversity audit (EN):")
+        openings = []
+        for key in sorted(results.keys()):
+            en = results[key].get("en", "")
+            first_words = " ".join(en.split()[:15])
+            openings.append(first_words)
+            logger.info(f"  {key}: \"{first_words}...\"")
+
+        # Check for duplicate first-3-words
+        first_three = [" ".join(o.split()[:3]).lower() for o in openings if o]
+        duplicates = len(first_three) - len(set(first_three))
+        if duplicates > 0:
+            logger.warning(f"⚠️ {duplicates} events share the same opening 3 words!")
+        else:
+            logger.info("✅ All events have unique openings")
+
+    # ══════════════════════════════════════════════════════════════
+    # TITLE TRANSLATION VERIFICATION
+    # ══════════════════════════════════════════════════════════════
+    async def verify_and_fix_titles(self, events: list) -> list:
+        """
+        Post-processing pass to ensure all event titles have proper
+        translations in all 5 languages. Fixes missing/placeholder titles.
+        """
+        repair_tasks = []
+
+        for idx, item in enumerate(events):
+            titles = item.get("titles", {})
+            missing_langs = []
+
+            for lang in self.languages:
+                title = titles.get(lang, "")
+                if not title or title in ("Event", "Data pending", ""):
+                    missing_langs.append(lang)
+
+            if missing_langs:
+                repair_tasks.append(self._repair_titles(idx, item, missing_langs))
+
+        if repair_tasks:
+            logger.info(f"🔧 Repairing titles for {len(repair_tasks)} event(s)...")
+            await asyncio.gather(*repair_tasks)
+
+        return events
+
+    async def _repair_titles(self, idx: int, item: dict, missing_langs: list):
+        """Generate missing title translations for specific languages."""
+        en_title = item.get("titles", {}).get("en", item.get("text", "Historical Event")[:80])
+        year = item.get("year", "")
+        slug = item.get("slug", "")
+
+        lang_names = {"en": "English", "ro": "Romanian", "es": "Spanish", "de": "German", "fr": "French"}
+        langs_str = ", ".join([f"{lang_names[l]} ({l})" for l in missing_langs])
+
+        prompt = f"""
+Translate this historical event title into the following languages: {langs_str}
+
+ORIGINAL (English): {en_title}
+CONTEXT: This event occurred in {year}. Wikipedia article: {slug}
+
+RULES:
+- Each title should be concise (5-15 words)
+- Use natural phrasing for each language
+- Keep proper nouns in their standard form for each language
+
+Return JSON with language codes as keys:
+{{ {', '.join([f'"{l}": "title in {lang_names[l]}"' for l in missing_langs])} }}
+"""
+
+        res = await self._safe_groq_call(prompt, f"Title repair {idx}", {})
+
+        titles = item.get("titles", {})
+        for lang in missing_langs:
+            fixed = res.get(lang, "")
+            if fixed and len(fixed) > 2:
+                titles[lang] = fixed
+                logger.info(f"✅ Fixed title {idx}:{lang} → {fixed[:50]}")
+            else:
+                # Fallback: use English
+                titles[lang] = en_title
+                logger.warning(f"⚠️ Title fix failed for {idx}:{lang} — using English")
+
+        item["titles"] = titles
 
     # ══════════════════════════════════════════════════════════════
     # SAFE GROQ CALL
