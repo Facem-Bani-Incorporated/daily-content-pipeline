@@ -248,7 +248,7 @@ async def main():
             )
 
         # ─────────────────────────────────────────────────────────
-        # STEP 8: Log full payload (visible in Railway even if Java rejects it)
+        # STEP 8: Save full payload to JSON file + short summary in logs
         # ─────────────────────────────────────────────────────────
         payload = DailyPayload(
             date_processed=today.date(),
@@ -263,28 +263,29 @@ async def main():
             },
         )
 
-        # Dump complete JSON to stdout — always visible in Railway logs
-        logger.info("═" * 60)
-        logger.info("📋 FULL PAYLOAD DUMP (copy this for Spring Boot dev):")
-        logger.info("═" * 60)
+        # Write full JSON to file
+        import os
+        output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+        os.makedirs(output_dir, exist_ok=True)
+        filename = f"payload_{today.date().isoformat()}.json"
+        filepath = os.path.join(output_dir, filename)
+
         try:
             full_json = payload.model_dump_json(by_alias=True, indent=2)
-            # Print in chunks so Railway doesn't truncate
-            lines = full_json.split("\n")
-            for line in lines:
-                print(line)
-        except Exception as dump_err:
-            logger.warning(f"Could not dump full JSON: {dump_err}")
-        logger.info("═" * 60)
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(full_json)
+            logger.info(f"💾 Full payload saved to: {filepath}")
+            logger.info(f"   File size: {len(full_json):,} bytes")
+        except Exception as e:
+            logger.error(f"❌ Could not write payload file: {e}")
 
-        # Log quiz summary per event
+        # Short summary in logs (no JSON spam)
+        logger.info(f"📋 Payload summary: {len(final_events_list)} events for {today.date()}")
         for i, ev in enumerate(final_events_list):
             title = ev.title_translations.en[:60]
             has_quiz = "✅" if ev.quiz else "❌"
-            q_count = 0
-            if ev.quiz:
-                q_count = len(ev.quiz.en)
-            logger.info(f"  Event {i+1}: {has_quiz} quiz ({q_count}q) — {title}")
+            q_count = len(ev.quiz.en) if ev.quiz else 0
+            logger.info(f"  {i+1}. {has_quiz} {q_count}q | {ev.year} | {title}")
 
         # ─────────────────────────────────────────────────────────
         # STEP 9: Send to Java backend (may fail if backend not ready)
