@@ -248,7 +248,7 @@ async def main():
             )
 
         # ─────────────────────────────────────────────────────────
-        # STEP 8: Save full payload to JSON file + short summary in logs
+        # STEP 8: Log JSON structure sample + summary
         # ─────────────────────────────────────────────────────────
         payload = DailyPayload(
             date_processed=today.date(),
@@ -263,29 +263,61 @@ async def main():
             },
         )
 
-        # Write full JSON to file
-        import os
-        output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
-        os.makedirs(output_dir, exist_ok=True)
-        filename = f"payload_{today.date().isoformat()}.json"
-        filepath = os.path.join(output_dir, filename)
+        # Log one complete event as JSON sample (for Spring Boot dev)
+        logger.info("━" * 50)
+        logger.info("📐 JSON STRUCTURE SAMPLE (first event):")
+        logger.info("━" * 50)
+        if final_events_list:
+            sample = final_events_list[0]
+            sample_dict = {
+                "category": sample.category.value,
+                "year": sample.year,
+                "eventDate": sample.event_date.isoformat(),
+                "sourceUrl": sample.source_url,
+                "titleTranslations": {"en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..."},
+                "narrativeTranslations": {"en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..."},
+                "impactScore": sample.impact_score,
+                "pageViews30d": sample.page_views_30d,
+                "gallery": [f"https://cloudinary.com/..." for _ in sample.gallery] if sample.gallery else [],
+                "quiz": None,
+            }
+            if sample.quiz:
+                # Show structure with first question per language as example
+                quiz_sample = {}
+                for lang in ["en", "ro", "es", "de", "fr"]:
+                    qs = getattr(sample.quiz, lang, [])
+                    if qs:
+                        q = qs[0]
+                        quiz_sample[lang] = [{
+                            "id": q.id,
+                            "question": q.question,
+                            "options": [{"id": o.id, "text": o.text} for o in q.options],
+                            "correctId": q.correct_id,
+                            "explanation": q.explanation,
+                        }, "... 3 more questions"]
+                    else:
+                        quiz_sample[lang] = []
+                sample_dict["quiz"] = quiz_sample
 
-        try:
-            full_json = payload.model_dump_json(by_alias=True, indent=2)
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(full_json)
-            logger.info(f"💾 Full payload saved to: {filepath}")
-            logger.info(f"   File size: {len(full_json):,} bytes")
-        except Exception as e:
-            logger.error(f"❌ Could not write payload file: {e}")
+            import json as _json
+            logger.info(_json.dumps(sample_dict, indent=2, ensure_ascii=False))
 
-        # Short summary in logs (no JSON spam)
-        logger.info(f"📋 Payload summary: {len(final_events_list)} events for {today.date()}")
+        logger.info("━" * 50)
+        logger.info("📋 FULL PAYLOAD WRAPPER:")
+        logger.info(_json.dumps({
+            "dateProcessed": "YYYY-MM-DD",
+            "events": [f"<event object> x{len(final_events_list)}"],
+            "metadata": payload.metadata,
+        }, indent=2))
+        logger.info("━" * 50)
+
+        # Summary table
+        logger.info(f"📊 Results: {len(final_events_list)} events, {quiz_ok} quizzes")
         for i, ev in enumerate(final_events_list):
-            title = ev.title_translations.en[:60]
-            has_quiz = "✅" if ev.quiz else "❌"
-            q_count = len(ev.quiz.en) if ev.quiz else 0
-            logger.info(f"  {i+1}. {has_quiz} {q_count}q | {ev.year} | {title}")
+            title = ev.title_translations.en[:55]
+            qz = "✅" if ev.quiz else "❌"
+            qn = len(ev.quiz.en) if ev.quiz else 0
+            logger.info(f"  {i+1}. {qz} {qn}q | {ev.year} | {title}")
 
         # ─────────────────────────────────────────────────────────
         # STEP 9: Send to Java backend (may fail if backend not ready)
