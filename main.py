@@ -13,6 +13,7 @@ from engine.scraper import WikiScraper
 from engine.processor import AIProcessor
 from engine.quiz_generator import QuizGenerator
 from engine.ranker import ScoringEngine
+from engine.social_agent import SocialMediaAgent
 from schema.models import DailyPayload, EventDetail, EventCategory, Translations
 
 logger = setup_logger("MainPipeline")
@@ -323,6 +324,16 @@ async def main():
         # STEP 9: Send to Java backend (may fail if backend not ready)
         # ─────────────────────────────────────────────────────────
         await send_to_java(payload)
+
+        # ─────────────────────────────────────────────────────────
+        # STEP 10: Social Media Agent — generate posts & send to Make.com
+        # ─────────────────────────────────────────────────────────
+        logger.info("📱 STEP 10 — Social Media Agent...")
+        try:
+            social_agent = SocialMediaAgent()
+            await social_agent.generate_and_post(final_events_list, today)
+        except Exception as e:
+            logger.error(f"⚠️ Social Media Agent failed (non-critical): {e}")
 
     except Exception as e:
         logger.error(f"🚨 Pipeline Crash: {e}", exc_info=True)
