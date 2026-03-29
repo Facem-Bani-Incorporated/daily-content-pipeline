@@ -260,13 +260,56 @@ OTHER EVENTS TODAY ({date_display}):
 
 GENERATE posts for each platform. Tone: curious, surprising, modern — make people stop scrolling.
 
-IMPORTANT STYLE RULES:
-1. Instagram: Start with a HOOK that creates shock/curiosity. Use emojis sparingly. End with a question + "📲 DailyHistory app". Include 15-20 hashtags.
-2. TikTok: Write a 45-second video script. First 2 seconds = hook. Include [VISUAL] cues and text overlays.
-3. LinkedIn: Extract a BUSINESS LESSON from the event. Professional but engaging. End with thought-provoking question.
-4. Facebook: Storytelling style, community-focused. Ask a question to drive comments.
-5. Each platform MUST have DIFFERENT content — not copy-paste.
-6. Use ONLY the real events above — do NOT add or invent events.
+══════════════════════════════════════════════════════════
+CRITICAL SEO & CAPTION RULES — READ CAREFULLY:
+══════════════════════════════════════════════════════════
+
+INSTAGRAM CAPTION (MUST be 300-500 words):
+- Start with a powerful HOOK line that creates shock or curiosity
+- Write a LONG, detailed, storytelling caption — minimum 300 words, ideally 400-500
+- Naturally weave in SEO keywords throughout the caption. Keywords to include naturally:
+  "today in history", "on this day", "historical event", "what happened today",
+  "history facts", "did you know history", "this day in history", "daily history",
+  "history of [topic]", "[year] history", "world history", "historical moments"
+- Tell the FULL story: what happened, why it mattered, what changed because of it, how it connects to today
+- Mention other events from today's date to add more keyword-rich content
+- End with an engaging question + "Download DailyHistory app to discover 5 events like this every day"
+- MAXIMUM 5 hashtags (Instagram/TikTok limit). Pick the 5 most powerful:
+  Example: #todayinhistory #historyfacts #onthisday #worldhistory #dailyhistory
+- Use line breaks (\\n\\n) between paragraphs for readability
+
+TIKTOK CAPTION (MUST be 150-300 words):
+- Write a LONG descriptive caption, not just a one-liner
+- Pack it with SEO keywords: "today in history", "did you know", "historical facts", "on this day in [year]"
+- Tell a mini version of the story in the caption itself
+- MAXIMUM 5 hashtags
+- The caption should work as standalone content even without watching the video
+
+TIKTOK SCRIPT:
+- 45-60 second video script
+- First 2 seconds = hook that stops scrolling
+- Include [VISUAL] cues and text overlay suggestions
+- Build tension, end with a twist or mind-blow moment
+
+LINKEDIN (MUST be 200-400 words):
+- Extract a BUSINESS/LEADERSHIP lesson from the historical event
+- Professional but engaging, thought-leadership style
+- Weave in keywords: "leadership lessons", "history teaches us", "innovation", "strategic thinking"
+- End with a thought-provoking question to drive comments
+- Maximum 5 hashtags
+
+FACEBOOK (MUST be 250-450 words):
+- Long-form storytelling style, community-focused
+- Tell the complete story with details that make people want to share
+- Include keywords naturally: "on this day", "today in history", "did you know"
+- Ask a specific question to drive comments
+- Mention DailyHistory app naturally
+
+GENERAL RULES:
+1. Each platform MUST have COMPLETELY DIFFERENT content — not copy-paste or slight rewording
+2. Use ONLY the real events provided — do NOT invent or add events
+3. Captions must be LONG and KEYWORD-RICH — short captions are NOT acceptable
+4. Maximum 5 hashtags per platform (Instagram and TikTok enforce this)
 
 Return ONLY valid JSON:
 {{
@@ -277,22 +320,22 @@ Return ONLY valid JSON:
   }},
   "platforms": {{
     "instagram": {{
-      "caption": "Full caption with line breaks as actual newlines",
-      "hashtags": ["history", "todayinhistory", "more_tags"],
+      "caption": "LONG 300-500 word caption packed with SEO keywords and storytelling",
+      "hashtags": ["todayinhistory", "historyfacts", "onthisday", "worldhistory", "dailyhistory"],
       "content_type": "single"
     }},
     "tiktok": {{
-      "script": "Full script with [VISUAL] cues",
-      "text_overlays": ["overlay1", "overlay2", "overlay3"],
+      "script": "Full 45-60s video script with [VISUAL] cues",
+      "text_overlays": ["overlay1", "overlay2", "overlay3", "overlay4"],
       "audio_suggestion": "audio type",
-      "duration_seconds": 45,
-      "caption": "Short caption with hashtags"
+      "duration_seconds": 50,
+      "caption": "LONG 150-300 word SEO caption with max 5 hashtags at the end"
     }},
     "linkedin": {{
-      "post": "Full LinkedIn post"
+      "post": "200-400 word professional post with leadership angle"
     }},
     "facebook": {{
-      "post": "Full Facebook post"
+      "post": "250-450 word storytelling post"
     }}
   }},
   "discovery_teaser": "One-line teaser about the other events today"
