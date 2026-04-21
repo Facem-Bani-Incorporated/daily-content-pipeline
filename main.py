@@ -25,6 +25,8 @@ async def send_to_java(payload: DailyPayload):
 
     events_final = []
     for ev in payload.events:
+        # NOTE: Backend Java does NOT know about 'quiz' field yet — do NOT send it.
+        # Only send fields that EventDTO.java actually has.
         ev_dict = {
             "category": ev.category.value,
             "titleTranslations": ev.title_translations.model_dump(),
@@ -34,27 +36,9 @@ async def send_to_java(payload: DailyPayload):
             "sourceUrl": str(ev.source_url),
             "pageViews30d": int(ev.page_views_30d),
             "gallery": ev.gallery if ev.gallery else [],
-            # ── NEW fields ──
             "isPro": bool(ev.is_pro),
             "location": ev.location,
         }
-
-        if ev.quiz:
-            quiz_dict = {}
-            for lang in ["en", "ro", "es", "de", "fr"]:
-                lang_questions = getattr(ev.quiz, lang, [])
-                quiz_dict[lang] = [
-                    {
-                        "id": q.id,
-                        "question": q.question,
-                        "options": [{"id": o.id, "text": o.text} for o in q.options],
-                        "correctId": q.correct_id,
-                        "explanation": q.explanation,
-                    }
-                    for q in lang_questions
-                ]
-            ev_dict["quiz"] = quiz_dict
-
         events_final.append(ev_dict)
 
     payload_to_serialize = {
@@ -83,6 +67,9 @@ async def send_to_java(payload: DailyPayload):
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             logger.info(f"📤 Sending to Java: {target_url}")
+            logger.info(f"📦 Payload: {len(events_final)} events "
+                        f"({sum(1 for e in events_final if e['isPro'])} PRO, "
+                        f"{sum(1 for e in events_final if not e['isPro'])} FREE)")
             response = await client.post(target_url, content=body_bytes, headers=headers)
             if response.status_code in [200, 201]:
                 logger.info(f"✅ SUCCESS! Payload accepted for date: {payload.date_processed}")
@@ -281,7 +268,6 @@ async def _build_event_details(
         try:
             ev_date = today.date().replace(year=year) if year > 0 else today.date()
         except ValueError:
-            # e.g. year=1200 on Feb 29 — fallback
             ev_date = today.date()
 
         narrative_data = narratives_map.get(f"EVENT_{idx}", {})
@@ -328,19 +314,12 @@ async def main():
     today = datetime.now()
 
     try:
-        # ─────────────────────────────────────────────────────────
-        # Run FREE and PRO pipelines IN PARALLEL
-        # ─────────────────────────────────────────────────────────
         logger.info("⚡ Launching FREE + PRO pipelines in parallel...")
         (free_events, free_meta), (pro_events, pro_meta) = await asyncio.gather(
             run_free_pipeline(today, processor, scraper, ranker, quiz_gen),
             run_pro_pipeline(today, processor, scraper, ranker, quiz_gen),
         )
 
-        # ─────────────────────────────────────────────────────────
-        # Combine events into single payload
-        # Free events first (positions 0-4), then PRO (positions 5-7)
-        # ─────────────────────────────────────────────────────────
         all_events = free_events + pro_events
 
         if not all_events:
@@ -361,33 +340,21 @@ async def main():
             metadata=combined_metadata,
         )
 
-        # ─────────────────────────────────────────────────────────
-        # Summary log
-        # ─────────────────────────────────────────────────────────
         logger.info("━" * 60)
         logger.info(f"📊 FINAL PAYLOAD: {len(all_events)} events total")
         logger.info(f"   → FREE: {len(free_events)} | PRO: {len(pro_events)}")
         logger.info("━" * 60)
         for i, ev in enumerate(all_events):
             tier = "💎 PRO" if ev.is_pro else "🆓 FREE"
-            qz = "✅" if ev.quiz else "❌"
-            qn = len(ev.quiz.en) if ev.quiz else 0
             title = ev.title_translations.en[:55]
             logger.info(
-                f"  {i+1}. {tier} [{ev.category.value:20s}] {qz} {qn}q | "
+                f"  {i+1}. {tier} [{ev.category.value:20s}] | "
                 f"{ev.year} | {title}"
             )
         logger.info("━" * 60)
 
-        # ─────────────────────────────────────────────────────────
-        # Send to Java backend (all in one payload)
-        # ─────────────────────────────────────────────────────────
         await send_to_java(payload)
 
-        # ─────────────────────────────────────────────────────────
-        # Social Media Agent — only uses FREE events
-        # (PRO content stays behind paywall, shouldn't be on social)
-        # ─────────────────────────────────────────────────────────
         logger.info("📱 Running Social Media Agent (FREE events only)...")
         try:
             if free_events:
