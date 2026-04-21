@@ -26,7 +26,6 @@ async def send_to_java(payload: DailyPayload):
     events_final = []
     for ev in payload.events:
         # NOTE: Backend Java does NOT know about 'quiz' field yet — do NOT send it.
-        # Only send fields that EventDTO.java actually has.
         ev_dict = {
             "category": ev.category.value,
             "titleTranslations": ev.title_translations.model_dump(),
@@ -67,15 +66,16 @@ async def send_to_java(payload: DailyPayload):
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             logger.info(f"📤 Sending to Java: {target_url}")
-            logger.info(f"📦 Payload: {len(events_final)} events "
-                        f"({sum(1 for e in events_final if e['isPro'])} PRO, "
-                        f"{sum(1 for e in events_final if not e['isPro'])} FREE)")
+            logger.info(
+                f"📦 Payload: {len(events_final)} events "
+                f"({sum(1 for e in events_final if e['isPro'])} PRO, "
+                f"{sum(1 for e in events_final if not e['isPro'])} FREE)"
+            )
             response = await client.post(target_url, content=body_bytes, headers=headers)
             if response.status_code in [200, 201]:
                 logger.info(f"✅ SUCCESS! Payload accepted for date: {payload.date_processed}")
             else:
                 logger.error(f"❌ Status {response.status_code}: {response.text}")
-                # DEBUG: dump the exact JSON we sent so we can see what Java choked on
                 logger.error(f"🧪 JSON sent (first 2000 chars):\n{body_json[:2000]}")
                 if len(body_json) > 2000:
                     logger.error(f"🧪 JSON sent (last 1000 chars):\n{body_json[-1000:]}")
@@ -93,7 +93,7 @@ async def safe_upload(scraper: WikiScraper, url: str, public_id: str):
 
 
 # ══════════════════════════════════════════════════════════════════
-# FREE PIPELINE — Existing flow: 60 → top 15 → top 5
+# FREE PIPELINE — 60 → top 15 → top 5
 # ══════════════════════════════════════════════════════════════════
 async def run_free_pipeline(
     today: datetime,
@@ -102,7 +102,6 @@ async def run_free_pipeline(
     ranker: ScoringEngine,
     quiz_gen: QuizGenerator,
 ) -> tuple:
-    """Returns (final_events_list, metadata_dict)."""
     logger.info(f"🆓 FREE — Discovering events for {today.strftime('%B %d')}...")
     all_events = await processor.discover_events(today)
     logger.info(f"📋 FREE got {len(all_events)} validated events")
@@ -155,7 +154,7 @@ async def run_free_pipeline(
 
 
 # ══════════════════════════════════════════════════════════════════
-# PRO PIPELINE — New flow: personalities + media + sport (1 each)
+# PRO PIPELINE — personalities + media + sport (1 each)
 # ══════════════════════════════════════════════════════════════════
 async def run_pro_pipeline(
     today: datetime,
@@ -164,7 +163,6 @@ async def run_pro_pipeline(
     ranker: ScoringEngine,
     quiz_gen: QuizGenerator,
 ) -> tuple:
-    """Returns (pro_events_list, metadata_dict)."""
     logger.info(f"💎 PRO — Discovering personalities/media/sport for {today.strftime('%B %d')}...")
 
     pro_candidates = await processor.discover_pro_events(today)
@@ -221,7 +219,7 @@ async def run_pro_pipeline(
 
 
 # ══════════════════════════════════════════════════════════════════
-# SHARED — Build EventDetail objects (used by both free & pro)
+# SHARED — Build EventDetail objects
 # ══════════════════════════════════════════════════════════════════
 async def _build_event_details(
     selected_items: list,
@@ -231,7 +229,6 @@ async def _build_event_details(
     scraper: WikiScraper,
     is_pro: bool,
 ) -> list:
-    """Fetch images + assemble EventDetail objects."""
     tier_tag = "pro" if is_pro else "free"
     final_list = []
 
@@ -268,7 +265,6 @@ async def _build_event_details(
                 gallery.append(img_url)
             await asyncio.sleep(0.5)
 
-        # Safely build the event_date, handling historical years < 1 AD
         try:
             ev_date = today.date().replace(year=year) if year > 0 else today.date()
         except ValueError:
@@ -305,7 +301,7 @@ async def _build_event_details(
 
 
 # ══════════════════════════════════════════════════════════════════
-# MAIN — orchestrate free + pro pipelines in parallel
+# MAIN — orchestrate FREE + PRO in parallel, send as ONE payload
 # ══════════════════════════════════════════════════════════════════
 async def main():
     logger.info("🚀 Starting DailyHistory Pipeline (FREE + PRO)...")
@@ -324,52 +320,13 @@ async def main():
             run_pro_pipeline(today, processor, scraper, ranker, quiz_gen),
         )
 
+        # IMPORTANT: Java's upsertDailyContent clears all existing events for
+        # the date before inserting. So we MUST send FREE + PRO in a single
+        # request — otherwise the second call wipes out the first.
         all_events = free_events + pro_events
 
         if not all_events:
             logger.error("❌ No events generated — aborting payload send")
-            return
-
-        # ═══════════════════════════════════════════════════════════
-        # DEBUG MODE — send FREE only, then PRO only, in 2 separate calls
-        # This isolates which one causes the 500
-        # ═══════════════════════════════════════════════════════════
-        DEBUG_SPLIT_SEND = True
-        if DEBUG_SPLIT_SEND:
-            logger.info("🧪 DEBUG MODE: splitting payload to isolate issue")
-
-            # First: only FREE events
-            if free_events:
-                logger.info("━" * 60)
-                logger.info("🧪 TEST 1/2: Sending ONLY FREE events...")
-                free_payload = DailyPayload(
-                    date_processed=today.date(),
-                    events=free_events,
-                    metadata={"test": "free_only"},
-                )
-                await send_to_java(free_payload)
-
-            # Then: only PRO events
-            if pro_events:
-                logger.info("━" * 60)
-                logger.info("🧪 TEST 2/2: Sending ONLY PRO events...")
-                pro_payload = DailyPayload(
-                    date_processed=today.date(),
-                    events=pro_events,
-                    metadata={"test": "pro_only"},
-                )
-                # Log the exact JSON for PRO events
-                for i, ev in enumerate(pro_events):
-                    logger.info(
-                        f"🧪 PRO #{i}: category={ev.category.value}, "
-                        f"year={ev.year}, is_pro={ev.is_pro}, "
-                        f"location={ev.location!r}, "
-                        f"gallery_count={len(ev.gallery)}"
-                    )
-                await send_to_java(pro_payload)
-
-            logger.info("━" * 60)
-            logger.info("🧪 DEBUG runs complete")
             return
 
         combined_metadata = {
