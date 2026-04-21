@@ -75,6 +75,10 @@ async def send_to_java(payload: DailyPayload):
                 logger.info(f"✅ SUCCESS! Payload accepted for date: {payload.date_processed}")
             else:
                 logger.error(f"❌ Status {response.status_code}: {response.text}")
+                # DEBUG: dump the exact JSON we sent so we can see what Java choked on
+                logger.error(f"🧪 JSON sent (first 2000 chars):\n{body_json[:2000]}")
+                if len(body_json) > 2000:
+                    logger.error(f"🧪 JSON sent (last 1000 chars):\n{body_json[-1000:]}")
         except Exception as e:
             logger.error(f"🚨 Connection error: {e}")
 
@@ -324,6 +328,48 @@ async def main():
 
         if not all_events:
             logger.error("❌ No events generated — aborting payload send")
+            return
+
+        # ═══════════════════════════════════════════════════════════
+        # DEBUG MODE — send FREE only, then PRO only, in 2 separate calls
+        # This isolates which one causes the 500
+        # ═══════════════════════════════════════════════════════════
+        DEBUG_SPLIT_SEND = True
+        if DEBUG_SPLIT_SEND:
+            logger.info("🧪 DEBUG MODE: splitting payload to isolate issue")
+
+            # First: only FREE events
+            if free_events:
+                logger.info("━" * 60)
+                logger.info("🧪 TEST 1/2: Sending ONLY FREE events...")
+                free_payload = DailyPayload(
+                    date_processed=today.date(),
+                    events=free_events,
+                    metadata={"test": "free_only"},
+                )
+                await send_to_java(free_payload)
+
+            # Then: only PRO events
+            if pro_events:
+                logger.info("━" * 60)
+                logger.info("🧪 TEST 2/2: Sending ONLY PRO events...")
+                pro_payload = DailyPayload(
+                    date_processed=today.date(),
+                    events=pro_events,
+                    metadata={"test": "pro_only"},
+                )
+                # Log the exact JSON for PRO events
+                for i, ev in enumerate(pro_events):
+                    logger.info(
+                        f"🧪 PRO #{i}: category={ev.category.value}, "
+                        f"year={ev.year}, is_pro={ev.is_pro}, "
+                        f"location={ev.location!r}, "
+                        f"gallery_count={len(ev.gallery)}"
+                    )
+                await send_to_java(pro_payload)
+
+            logger.info("━" * 60)
+            logger.info("🧪 DEBUG runs complete")
             return
 
         combined_metadata = {
