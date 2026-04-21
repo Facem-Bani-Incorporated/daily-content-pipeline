@@ -83,6 +83,13 @@ class AIProcessor:
             data = {}
         return {lang: data.get(lang) or fallback_text for lang in self.languages}
 
+    def _normalize_location(self, e: dict) -> dict:
+        """Normalize location field — convert string 'null'/'none'/'' to actual None."""
+        loc = e.get("location")
+        if isinstance(loc, str) and loc.strip().lower() in ("null", "none", "", "n/a"):
+            e["location"] = None
+        return e
+
     # ══════════════════════════════════════════════════════════════
     # PASS 1 — Discovery with strict date anchoring
     # ══════════════════════════════════════════════════════════════
@@ -121,7 +128,8 @@ STRICT JSON SCHEMA:
       "category": "one_from_allowed_list",
       "ai_score": 75,
       "date_confidence": "HIGH/MEDIUM",
-      "date_source": "Brief note on why you're sure of this date"
+      "date_source": "Brief note on why you're sure of this date",
+      "location": "City, Country (or null if not applicable)"
     }}
   ]
 }}
@@ -146,6 +154,9 @@ ONLY include events where date_confidence is HIGH.
             if e.get("date_confidence", "").upper() != "HIGH":
                 logger.warning(f"⚠️ Skipping low-confidence: {slug}")
                 continue
+
+            # Normalize location field (same as PRO pipeline)
+            e = self._normalize_location(e)
 
             seen_slugs.add(slug)
             validated.append(e)
@@ -240,9 +251,7 @@ Only HIGH confidence events.
                 continue
 
             # Normalize location field
-            loc = e.get("location")
-            if isinstance(loc, str) and loc.strip().lower() in ("null", "none", "", "n/a"):
-                e["location"] = None
+            e = self._normalize_location(e)
 
             seen_slugs.add(slug)
             validated.append(e)
