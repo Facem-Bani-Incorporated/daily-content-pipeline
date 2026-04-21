@@ -1,18 +1,11 @@
-from pydantic import BaseModel, Field, ConfigDict
-from pydantic.alias_generators import to_camel
-from typing import List, Optional
 from datetime import date
 from enum import Enum
-
-
-class CamelModel(BaseModel):
-    model_config = ConfigDict(
-        alias_generator=to_camel,
-        populate_by_name=True,
-    )
+from typing import List, Optional
+from pydantic import BaseModel, Field, HttpUrl
 
 
 class EventCategory(str, Enum):
+    # ── Existing free categories ──
     WAR_CONFLICT = "war_conflict"
     TECH_INNOVATION = "tech_innovation"
     SCIENCE_DISCOVERY = "science_discovery"
@@ -22,52 +15,70 @@ class EventCategory(str, Enum):
     EXPLORATION = "exploration"
     RELIGION_PHIL = "religion_phil"
 
-
-class Translations(CamelModel):
-    en: str
-    ro: str
-    es: str
-    de: str
-    fr: str
+    # ── NEW: PRO-only categories ──
+    PERSONALITIES = "personalities"
+    MEDIA = "media"
+    SPORT = "sport"
 
 
-# ── Quiz ──
+# Set of categories that are exclusively PRO content
+PRO_CATEGORIES = {
+    EventCategory.PERSONALITIES.value,
+    EventCategory.MEDIA.value,
+    EventCategory.SPORT.value,
+}
 
-class QuizOption(CamelModel):
+
+class Translations(BaseModel):
+    en: str = "Data pending"
+    ro: str = "Data pending"
+    es: str = "Data pending"
+    de: str = "Data pending"
+    fr: str = "Data pending"
+
+
+class QuizOption(BaseModel):
     id: str
     text: str
 
-class QuizQuestion(CamelModel):
+
+class QuizQuestion(BaseModel):
     id: str
     question: str
     options: List[QuizOption]
-    correct_id: str
+    correct_id: str = Field(alias="correctId")
     explanation: str
 
-class QuizTranslations(CamelModel):
-    en: List[QuizQuestion]
-    ro: List[QuizQuestion]
-    es: List[QuizQuestion]
-    de: List[QuizQuestion]
-    fr: List[QuizQuestion]
+    class Config:
+        populate_by_name = True
 
 
-# ── Event + Payload ──
+class QuizTranslations(BaseModel):
+    en: List[QuizQuestion] = []
+    ro: List[QuizQuestion] = []
+    es: List[QuizQuestion] = []
+    de: List[QuizQuestion] = []
+    fr: List[QuizQuestion] = []
 
-class EventDetail(CamelModel):
+
+class EventDetail(BaseModel):
     category: EventCategory
     year: int
     event_date: date
     source_url: str
     title_translations: Translations
     narrative_translations: Translations
-    impact_score: float = Field(..., ge=0, le=100)
+    impact_score: float
     page_views_30d: int = 0
     gallery: List[str] = []
     quiz: Optional[QuizTranslations] = None
 
+    # ── NEW PRO fields ──
+    is_pro: bool = False
+    location: Optional[str] = None
 
-class DailyPayload(CamelModel):
+
+class DailyPayload(BaseModel):
     date_processed: date
     events: List[EventDetail]
-    metadata: dict = Field(default_factory=dict)
+    metadata: dict = {}
