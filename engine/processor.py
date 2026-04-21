@@ -96,7 +96,7 @@ List historical events that occurred EXACTLY on {date_str} (month={month}, day={
 
 CRITICAL RULES — READ CAREFULLY:
 1. DATE INTEGRITY: Every event MUST have occurred on EXACTLY {date_str}. 
-   - If an event started on {date_str.replace(str(day), str(day-1 if day > 1 else day+1))}, it does NOT count.
+   - If an event started on {date_str.replace(str(day), str(day - 1 if day > 1 else day + 1))}, it does NOT count.
    - If an event is commonly associated with this week but happened on a different day, EXCLUDE it.
 2. WIKIPEDIA VERIFICATION: The "slug" MUST be the exact Wikipedia article title.
    - Example: "Battle_of_Gettysburg" not "battle of gettysburg"
@@ -153,224 +153,228 @@ ONLY include events where date_confidence is HIGH.
         logger.info(f"✅ Found {len(validated)} HIGH-confidence events for {date_str}")
         return validated
 
-        async def discover_pro_events(self, target_date: datetime) -> list:
-            """
-            Separate AI discovery call focused EXCLUSIVELY on the 3 PRO categories:
-              - personalities (births/deaths of iconic figures)
-              - media         (films, albums, TV, radio, magazines)
-              - sport         (Olympic moments, records, championships)
-            """
-            date_str = self._get_target_date_str(target_date)
-            month, day = self._get_month_day(target_date)
+    # ══════════════════════════════════════════════════════════════
+    # PRO DISCOVERY — Dedicated pass for Personalities / Media / Sport
+    # ══════════════════════════════════════════════════════════════
+    async def discover_pro_events(self, target_date: datetime) -> list:
+        """
+        Separate AI discovery call focused EXCLUSIVELY on the 3 PRO categories:
+          - personalities (births/deaths of iconic figures)
+          - media         (films, albums, TV, radio, magazines)
+          - sport         (Olympic moments, records, championships)
+        """
+        date_str = self._get_target_date_str(target_date)
+        month, day = self._get_month_day(target_date)
 
-            pro_cats = ["personalities", "media", "sport"]
+        pro_cats = ["personalities", "media", "sport"]
 
-            prompt = f"""
-    You are a Senior Pop-Culture & Entertainment Historian.
-    Your ONLY job is to list PREMIUM, crowd-pleasing historical events that occurred
-    EXACTLY on {date_str} (month={month}, day={day}) — STRICTLY from these 3 categories:
+        prompt = f"""
+You are a Senior Pop-Culture & Entertainment Historian.
+Your ONLY job is to list PREMIUM, crowd-pleasing historical events that occurred
+EXACTLY on {date_str} (month={month}, day={day}) — STRICTLY from these 3 categories:
 
-    1. **personalities** — births or deaths of globally iconic people:
-       actors, musicians, athletes, authors, scientists, political leaders, royalty, artists.
-       Must be a household name (Einstein, Elvis, Ali, Mozart, Marilyn Monroe level).
+1. **personalities** — births or deaths of globally iconic people:
+   actors, musicians, athletes, authors, scientists, political leaders, royalty, artists.
+   Must be a household name (Einstein, Elvis, Ali, Mozart, Marilyn Monroe level).
 
-    2. **media** — milestone events in film, TV, music, radio, publishing:
-       movie premieres of classics, #1 album releases, iconic TV firsts, historic concerts,
-       Oscar-winning ceremonies, famous book publications, groundbreaking broadcasts.
+2. **media** — milestone events in film, TV, music, radio, publishing:
+   movie premieres of classics, #1 album releases, iconic TV firsts, historic concerts,
+   Oscar-winning ceremonies, famous book publications, groundbreaking broadcasts.
 
-    3. **sport** — historic sporting moments:
-       Olympic medal moments, world records broken, World Cup/Super Bowl wins,
-       legendary boxing fights, first-ever championships, unforgettable games.
+3. **sport** — historic sporting moments:
+   Olympic medal moments, world records broken, World Cup/Super Bowl wins,
+   legendary boxing fights, first-ever championships, unforgettable games.
 
-    ═══════════════════════════════════════════════════════════════
-    HARD RULES:
-    ═══════════════════════════════════════════════════════════════
-    1. DATE INTEGRITY: Event MUST have occurred EXACTLY on {date_str}.
-    2. WIKIPEDIA: "slug" MUST match the exact Wikipedia article title (e.g. "Elvis_Presley").
-    3. FAME BAR: Only pick globally famous people/events. No obscure figures, no local news.
-    4. DIVERSITY: Aim for good spread across all 3 categories (at least 5 per category).
-    5. QUANTITY: Aim for 20-30 total events across the 3 categories combined.
-    6. CONFIDENCE: Only include HIGH-confidence events.
+═══════════════════════════════════════════════════════════════
+HARD RULES:
+═══════════════════════════════════════════════════════════════
+1. DATE INTEGRITY: Event MUST have occurred EXACTLY on {date_str}.
+2. WIKIPEDIA: "slug" MUST match the exact Wikipedia article title (e.g. "Elvis_Presley").
+3. FAME BAR: Only pick globally famous people/events. No obscure figures, no local news.
+4. DIVERSITY: Aim for good spread across all 3 categories (at least 5 per category).
+5. QUANTITY: Aim for 20-30 total events across the 3 categories combined.
+6. CONFIDENCE: Only include HIGH-confidence events.
 
-    STRICT JSON SCHEMA:
+STRICT JSON SCHEMA:
+{{
+  "events": [
     {{
-      "events": [
-        {{
-          "year": 1977,
-          "text": "Precise 1-2 sentence description clearly stating it happened on {date_str}.",
-          "slug": "Exact_Wikipedia_Article_Title",
-          "category": "personalities | media | sport",
-          "ai_score": 85,
-          "date_confidence": "HIGH",
-          "date_source": "Brief note on why you're sure of this date",
-          "location": "City, Country (or null if not applicable)"
-        }}
-      ]
+      "year": 1977,
+      "text": "Precise 1-2 sentence description clearly stating it happened on {date_str}.",
+      "slug": "Exact_Wikipedia_Article_Title",
+      "category": "personalities | media | sport",
+      "ai_score": 85,
+      "date_confidence": "HIGH",
+      "date_source": "Brief note on why you're sure of this date",
+      "location": "City, Country (or null if not applicable)"
     }}
+  ]
+}}
 
-    ALLOWED CATEGORIES (strict): {pro_cats}
+ALLOWED CATEGORIES (strict): {pro_cats}
 
-    Remember: This content is for PAYING USERS. Quality and star-power matter more than quantity.
-    Only HIGH confidence events.
-    """
+Remember: This content is for PAYING USERS. Quality and star-power matter more than quantity.
+Only HIGH confidence events.
+"""
 
-            res = await self._safe_groq_call(
-                prompt, f"PRO Discovery ({date_str})", {"events": []}
-            )
-            events = res.get("events", [])
+        res = await self._safe_groq_call(
+            prompt, f"PRO Discovery ({date_str})", {"events": []}
+        )
+        events = res.get("events", [])
 
-            validated = []
-            seen_slugs = set()
-            for e in events:
-                slug = e.get("slug")
-                cat = e.get("category", "").lower()
+        validated = []
+        seen_slugs = set()
+        for e in events:
+            slug = e.get("slug")
+            cat = e.get("category", "").lower()
 
-                if not isinstance(e.get("year"), int) or not slug or slug in seen_slugs:
-                    continue
-                # Hard filter: only the 3 PRO categories allowed here
-                if cat not in pro_cats:
-                    logger.warning(f"⚠️ PRO discovery returned wrong category '{cat}' — skipped: {slug}")
-                    continue
-                # Only HIGH confidence
-                if e.get("date_confidence", "").upper() != "HIGH":
-                    logger.warning(f"⚠️ Skipping low-confidence PRO: {slug}")
-                    continue
+            if not isinstance(e.get("year"), int) or not slug or slug in seen_slugs:
+                continue
+            # Hard filter: only the 3 PRO categories allowed here
+            if cat not in pro_cats:
+                logger.warning(f"⚠️ PRO discovery returned wrong category '{cat}' — skipped: {slug}")
+                continue
+            # Only HIGH confidence
+            if e.get("date_confidence", "").upper() != "HIGH":
+                logger.warning(f"⚠️ Skipping low-confidence PRO: {slug}")
+                continue
 
-                # Normalize location field
-                loc = e.get("location")
-                if isinstance(loc, str) and loc.strip().lower() in ("null", "none", "", "n/a"):
-                    e["location"] = None
+            # Normalize location field
+            loc = e.get("location")
+            if isinstance(loc, str) and loc.strip().lower() in ("null", "none", "", "n/a"):
+                e["location"] = None
 
-                seen_slugs.add(slug)
-                validated.append(e)
+            seen_slugs.add(slug)
+            validated.append(e)
 
-            # Log per-category breakdown
-            by_cat = {}
-            for e in validated:
-                by_cat[e["category"]] = by_cat.get(e["category"], 0) + 1
-            logger.info(f"✅ PRO discovery: {len(validated)} events → {by_cat}")
+        # Log per-category breakdown
+        by_cat = {}
+        for e in validated:
+            by_cat[e["category"]] = by_cat.get(e["category"], 0) + 1
+        logger.info(f"✅ PRO discovery: {len(validated)} events → {by_cat}")
 
-            return validated
+        return validated
 
-        # ══════════════════════════════════════════════════════════════
-        # PRO SELECTION — Pick best event per category (1 personalities + 1 media + 1 sport)
-        # ══════════════════════════════════════════════════════════════
-        async def deep_rank_pro_per_category(self, candidates: list, target_date: datetime) -> list:
-            """
-            Rank PRO candidates and return the top 1 per category.
-            Returns a list of up to 3 events (1 personalities + 1 media + 1 sport).
-            """
-            if not candidates:
-                return []
+    # ══════════════════════════════════════════════════════════════
+    # PRO SELECTION — Pick best event per category (1 personalities + 1 media + 1 sport)
+    # ══════════════════════════════════════════════════════════════
+    async def deep_rank_pro_per_category(self, candidates: list, target_date: datetime) -> list:
+        """
+        Rank PRO candidates and return the top 1 per category.
+        Returns a list of up to 3 events (1 personalities + 1 media + 1 sport).
+        """
+        if not candidates:
+            return []
 
-            date_str = self._get_target_date_str(target_date)
+        date_str = self._get_target_date_str(target_date)
 
-            # Bucket candidates by category
-            buckets = {"personalities": [], "media": [], "sport": []}
-            for c in candidates:
-                cat = c.get("category", "").lower()
-                if cat in buckets:
-                    buckets[cat].append(c)
+        # Bucket candidates by category
+        buckets = {"personalities": [], "media": [], "sport": []}
+        for c in candidates:
+            cat = c.get("category", "").lower()
+            if cat in buckets:
+                buckets[cat].append(c)
 
-            # Build AI prompt with indexed candidates per bucket
-            prompt_blocks = []
-            id_map = {}
-            counter = 0
-            for cat_name, items in buckets.items():
-                if not items:
-                    continue
-                prompt_blocks.append(f"\n━━━ CATEGORY: {cat_name.upper()} ━━━")
-                for item in items:
-                    key = f"ID_{counter}"
-                    id_map[key] = item
-                    prompt_blocks.append(
-                        f"{key} ({item['year']}): {item['text'][:180]}"
-                    )
-                    counter += 1
+        # Build AI prompt with indexed candidates per bucket
+        prompt_blocks = []
+        id_map = {}
+        counter = 0
+        for cat_name, items in buckets.items():
+            if not items:
+                continue
+            prompt_blocks.append(f"\n━━━ CATEGORY: {cat_name.upper()} ━━━")
+            for item in items:
+                key = f"ID_{counter}"
+                id_map[key] = item
+                prompt_blocks.append(
+                    f"{key} ({item['year']}): {item['text'][:180]}"
+                )
+                counter += 1
 
-            candidates_text = "\n".join(prompt_blocks)
+        candidates_text = "\n".join(prompt_blocks)
 
-            prompt = f"""
-    You are a premium content curator for a history app's PAID TIER.
+        prompt = f"""
+You are a premium content curator for a history app's PAID TIER.
 
-    For {date_str}, select the SINGLE MOST COMPELLING event from EACH of the 3 categories below.
-    These events will be shown to paying subscribers, so pick the ones with highest
-    star-power, cultural resonance, and emotional pull.
+For {date_str}, select the SINGLE MOST COMPELLING event from EACH of the 3 categories below.
+These events will be shown to paying subscribers, so pick the ones with highest
+star-power, cultural resonance, and emotional pull.
 
-    SELECTION CRITERIA:
-    1. Global fame — is this a universally recognized moment/person?
-    2. Storytelling potential — is there a rich narrative to tell?
-    3. Emotional impact — will readers feel something?
-    4. Shareability — would someone talk about this with friends?
+SELECTION CRITERIA:
+1. Global fame — is this a universally recognized moment/person?
+2. Storytelling potential — is there a rich narrative to tell?
+3. Emotional impact — will readers feel something?
+4. Shareability — would someone talk about this with friends?
 
-    OUTPUT: Pick exactly 1 event per category (personalities, media, sport).
-    If a category has no candidates, skip it.
+OUTPUT: Pick exactly 1 event per category (personalities, media, sport).
+If a category has no candidates, skip it.
 
-    STRICT JSON:
+STRICT JSON:
+{{
+  "selections": [
     {{
-      "selections": [
-        {{
-          "original_id": "ID_0",
-          "category": "personalities",
-          "deep_score": 92,
-          "titles": {{ "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..." }}
-        }},
-        {{
-          "original_id": "ID_7",
-          "category": "media",
-          "deep_score": 88,
-          "titles": {{ "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..." }}
-        }},
-        {{
-          "original_id": "ID_14",
-          "category": "sport",
-          "deep_score": 85,
-          "titles": {{ "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..." }}
-        }}
-      ]
+      "original_id": "ID_0",
+      "category": "personalities",
+      "deep_score": 92,
+      "titles": {{ "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..." }}
+    }},
+    {{
+      "original_id": "ID_7",
+      "category": "media",
+      "deep_score": 88,
+      "titles": {{ "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..." }}
+    }},
+    {{
+      "original_id": "ID_14",
+      "category": "sport",
+      "deep_score": 85,
+      "titles": {{ "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..." }}
     }}
+  ]
+}}
 
-    CANDIDATES:
-    {candidates_text}
-    """
+CANDIDATES:
+{candidates_text}
+"""
 
-            res = await self._safe_groq_call(prompt, "PRO Deep Rank", {"selections": []})
+        res = await self._safe_groq_call(prompt, "PRO Deep Rank", {"selections": []})
 
-            selected = []
-            seen_cats = set()
-            for entry in res.get("selections", []):
-                original_id = entry.get("original_id")
-                cat = entry.get("category", "").lower()
+        selected = []
+        seen_cats = set()
+        for entry in res.get("selections", []):
+            original_id = entry.get("original_id")
+            cat = entry.get("category", "").lower()
 
-                if original_id not in id_map or cat in seen_cats:
-                    continue
+            if original_id not in id_map or cat in seen_cats:
+                continue
 
-                item = id_map[original_id]
-                item.update({
-                    "deep_score": entry.get("deep_score", 50),
-                    "titles": self._ensure_langs(entry.get("titles", {})),
+            item = id_map[original_id]
+            item.update({
+                "deep_score": entry.get("deep_score", 50),
+                "titles": self._ensure_langs(entry.get("titles", {})),
+                "is_pro": True,
+            })
+            selected.append(item)
+            seen_cats.add(cat)
+
+        # Fallback: if AI didn't return all 3, fill from highest ai_score per missing category
+        for cat_name in ["personalities", "media", "sport"]:
+            if cat_name in seen_cats:
+                continue
+            pool = sorted(buckets[cat_name], key=lambda x: x.get("ai_score", 0), reverse=True)
+            if pool:
+                fallback = pool[0]
+                fallback.update({
+                    "deep_score": fallback.get("ai_score", 50),
+                    "titles": self._ensure_langs({}),
                     "is_pro": True,
                 })
-                selected.append(item)
-                seen_cats.add(cat)
+                selected.append(fallback)
+                logger.warning(f"⚠️ PRO fallback for '{cat_name}': {fallback['slug']}")
 
-            # Fallback: if AI didn't return all 3, fill from highest ai_score per missing category
-            for cat_name in ["personalities", "media", "sport"]:
-                if cat_name in seen_cats:
-                    continue
-                pool = sorted(buckets[cat_name], key=lambda x: x.get("ai_score", 0), reverse=True)
-                if pool:
-                    fallback = pool[0]
-                    fallback.update({
-                        "deep_score": fallback.get("ai_score", 50),
-                        "titles": self._ensure_langs({}),
-                        "is_pro": True,
-                    })
-                    selected.append(fallback)
-                    logger.warning(f"⚠️ PRO fallback for '{cat_name}': {fallback['slug']}")
+        logger.info(f"🏆 PRO selected {len(selected)} events (1 per category)")
+        return selected
 
-            logger.info(f"🏆 PRO selected {len(selected)} events (1 per category)")
-            return selected
     # ══════════════════════════════════════════════════════════════
     # PASS 1.5 — Integrity check with adversarial prompting
     # ══════════════════════════════════════════════════════════════
@@ -400,7 +404,7 @@ You are an ADVERSARIAL Fact-Checker whose job is to FIND ERRORS.
 Your goal is to REJECT events that did not happen on exactly {date_str} (month={month}, day={day}).
 
 COMMON MISTAKES TO CATCH:
-- Events that happened on {date_str.replace(str(day), str(day-1 if day > 1 else day+1))} or {date_str.replace(str(day), str(day+1 if day < 28 else day-1))} instead of {date_str}
+- Events that happened on {date_str.replace(str(day), str(day - 1 if day > 1 else day + 1))} or {date_str.replace(str(day), str(day + 1 if day < 28 else day - 1))} instead of {date_str}
 - Events where the DATE is actually when something was announced/signed vs when it happened
 - Battles that STARTED on a different day but are commonly associated with this date
 - Events from the wrong calendar system (Julian vs Gregorian confusion)
@@ -530,19 +534,19 @@ CANDIDATES:
         }
 
         # Multiple date format patterns to search for
-        month_name = target_date.strftime("%B")       # "March"
+        month_name = target_date.strftime("%B")  # "March"
         month_name_short = target_date.strftime("%b")  # "Mar"
         day_str = str(day)
         day_padded = f"{day:02d}"
 
         date_patterns = [
-            f"{month_name} {day_str}",           # "March 19"
-            f"{month_name} {day_padded}",         # "March 09"
-            f"{day_str} {month_name}",            # "19 March"
-            f"{day_padded} {month_name}",         # "09 March"
-            f"{month_name_short} {day_str}",      # "Mar 19"
-            f"{month_name_short}. {day_str}",     # "Mar. 19"
-            f"{day_str} {month_name_short}",      # "19 Mar"
+            f"{month_name} {day_str}",  # "March 19"
+            f"{month_name} {day_padded}",  # "March 09"
+            f"{day_str} {month_name}",  # "19 March"
+            f"{day_padded} {month_name}",  # "09 March"
+            f"{month_name_short} {day_str}",  # "Mar 19"
+            f"{month_name_short}. {day_str}",  # "Mar. 19"
+            f"{day_str} {month_name_short}",  # "19 Mar"
         ]
 
         # ── Step A: Fetch Wikipedia's "On this day" page for ground truth slugs ──
@@ -668,7 +672,7 @@ CANDIDATES:
     async def generate_secondary_narratives(self, top_events: list, target_date: datetime) -> dict:
         """
         Generate rich narratives for each event in all 5 languages.
-        
+
         Bulletproof guarantees:
         1. Each event gets a UNIQUE opening technique (no two stories start alike)
         2. Every language is generated independently with retries
@@ -730,7 +734,7 @@ CANDIDATES:
         return assignments
 
     async def _fetch_narrative_lang_bulletproof(
-        self, idx: int, item: dict, lang: str, date_str: str, technique: dict
+            self, idx: int, item: dict, lang: str, date_str: str, technique: dict
     ) -> tuple:
         """
         Generate a single narrative for one event in one language.
@@ -881,7 +885,7 @@ Return JSON: {{ "content": "your narrative here" }}
         return True, "OK"
 
     async def _verify_and_patch_narratives(
-        self, results: dict, top_events: list, date_str: str, technique_assignments: list
+            self, results: dict, top_events: list, date_str: str, technique_assignments: list
     ) -> dict:
         """
         Final verification pass: ensure every event has all 5 languages.
@@ -930,7 +934,7 @@ Return JSON: {{ "content": "your narrative here" }}
         return results
 
     async def _emergency_regenerate(
-        self, idx: int, item: dict, lang: str, date_str: str, technique: dict, results: dict
+            self, idx: int, item: dict, lang: str, date_str: str, technique: dict, results: dict
     ):
         """Emergency regeneration of a narrative from scratch."""
         _, content = await self._fetch_narrative_lang_bulletproof(idx, item, lang, date_str, technique)
