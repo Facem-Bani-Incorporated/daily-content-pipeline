@@ -535,6 +535,20 @@ async def main():
             deduped_all.append(ev)
         all_events = deduped_all
 
+        # Sort: FREE events first (by impact_score desc), then PRO (by impact_score desc).
+        # Frontend uses events[0] = highest-impact FREE = Main/Home hero.
+        free_sorted = sorted(
+            [e for e in all_events if not e.is_pro],
+            key=lambda e: e.impact_score,
+            reverse=True,
+        )
+        pro_sorted = sorted(
+            [e for e in all_events if e.is_pro],
+            key=lambda e: e.impact_score,
+            reverse=True,
+        )
+        all_events = free_sorted + pro_sorted
+
         combined_metadata = {
             **free_meta,
             **pro_meta,
