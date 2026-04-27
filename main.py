@@ -20,16 +20,17 @@ from schema.models import DailyPayload, EventDetail, EventCategory, Translations
 
 logger = setup_logger("MainPipeline")
 
+# How many events we want at the end of each pipeline
+TARGET_FREE_COUNT = 5
+TARGET_PRO_COUNT = 3  # 1 per category (personalities, media, sport)
+
+# Minimum acceptable count before we fall back to non-validated events
+MIN_FREE_COUNT = 5
+MIN_PRO_COUNT = 3
+
 
 def _dedupe_by_slug(events: list, label: str = "") -> list:
-    """
-    Remove duplicate events (same slug appearing twice in the same list).
-    Keeps the FIRST occurrence — assumes the list is already sorted by score.
-
-    This protects against the AI returning the same original_id multiple times
-    in deep_rank_and_select, which was producing payloads like:
-      [Abdul Hamid II, Abdul Hamid II, Carabineros, Carabineros, Zambia]
-    """
+    """Remove same-slug duplicates within a single list. Keeps first occurrence."""
     seen_slugs = set()
     result = []
     dropped = 0
@@ -128,16 +129,50 @@ def _is_wikipedia_url(url: str) -> bool:
     return "wikipedia.org" in url_lower or "wikimedia.org" in url_lower
 
 
+def _backfill_to_minimum(
+    validated: list,
+    all_candidates: list,
+    minimum: int,
+    label: str = "FREE",
+) -> list:
+    """
+    If validator was too aggressive and rejected events we actually need,
+    backfill from the original candidate pool (sorted by ai_score) to
+    reach at least `minimum` events.
+
+    Backfilled events are ranked by AI confidence score so we still get
+    the AI's best picks, just without the wiki-date check.
+    """
+    if len(validated) >= minimum:
+        return validated
+
+    needed = minimum - len(validated)
+    used_slugs = {(v.get("slug") or "").lower() for v in validated}
+
+    backfill_pool = [
+        c for c in all_candidates
+        if (c.get("slug") or "").lower() not in used_slugs
+    ]
+    backfill_pool.sort(key=lambda x: x.get("ai_score", 0), reverse=True)
+
+    backfilled = backfill_pool[:needed]
+    if backfilled:
+        logger.warning(
+            f"⚠️ [{label}] Validator too strict — backfilling {len(backfilled)} "
+            f"events from AI candidate pool to reach min {minimum}"
+        )
+        for ev in backfilled:
+            logger.warning(
+                f"  ↩ Backfilled: {ev.get('year')} {ev.get('slug')} "
+                f"(ai_score: {ev.get('ai_score', 0)})"
+            )
+
+    return validated + backfilled
+
+
 # ══════════════════════════════════════════════════════════════════
 # FREE PIPELINE
-# Order:
-#   1. discover
-#   2. wiki-validate-date (strict)
-#   3. dedupe by slug (in-payload)
-#   4. rank
-#   5. dedupe by slug AGAIN (rank can re-introduce dups)
-#   6. dedupe vs DB (cross-day)
-#   7. top 5
+# Target: 5 events labeled is_pro=False
 # ══════════════════════════════════════════════════════════════════
 async def run_free_pipeline(
     today: datetime,
@@ -157,29 +192,36 @@ async def run_free_pipeline(
         logger.error("❌ FREE: AI returned no events")
         return [], {"free_discovered": 0}
 
-    logger.info("🗓️ FREE — Validating dates against Wikipedia 'On this day'...")
-    all_events = await date_validator.validate_events(all_events, today, tier="FREE")
+    # Keep original pool for potential backfill
+    original_pool = list(all_events)
 
-    if not all_events:
-        logger.error("❌ FREE: no events passed Wikipedia date validation")
-        return [], {"free_discovered": 0, "free_after_date_validation": 0}
+    logger.info("🗓️ FREE — Validating dates against Wikipedia...")
+    validated = await date_validator.validate_events(all_events, today, tier="FREE")
 
-    logger.info(f"🔬 FREE — Deep ranking {len(all_events)} events to top 15...")
-    top15 = await processor.deep_rank_and_select(all_events, today)
+    # Backfill if validator was too strict
+    if len(validated) < MIN_FREE_COUNT:
+        validated = _backfill_to_minimum(
+            validated, original_pool, MIN_FREE_COUNT, label="FREE"
+        )
 
-    # Dedupe right after ranking — AI tends to return same ID multiple times
-    top15 = _dedupe_by_slug(top15, "FREE-rank")
+    if not validated:
+        logger.error("❌ FREE: no events available even after backfill")
+        return [], {"free_discovered": len(all_events), "free_after_validation": 0}
 
-    if not top15:
-        # Fallback to ai_score if ranking failed entirely
-        top15 = sorted(all_events, key=lambda x: x.get("ai_score", 0), reverse=True)[:15]
-        top15 = _dedupe_by_slug(top15, "FREE-rank-fallback")
+    logger.info(f"🔬 FREE — Deep ranking {len(validated)} events...")
+    top_ranked = await processor.deep_rank_and_select(validated, today)
+    top_ranked = _dedupe_by_slug(top_ranked, "FREE-rank")
 
-    logger.info("📊 FREE — Fetching pageviews for top 15...")
-    view_tasks = [scraper.fetch_page_views(item.get("slug", "")) for item in top15]
+    if not top_ranked:
+        # If ranking failed, just sort by ai_score
+        top_ranked = sorted(validated, key=lambda x: x.get("ai_score", 0), reverse=True)
+        top_ranked = _dedupe_by_slug(top_ranked, "FREE-rank-fallback")
+
+    logger.info("📊 FREE — Fetching pageviews...")
+    view_tasks = [scraper.fetch_page_views(item.get("slug", "")) for item in top_ranked]
     views = await asyncio.gather(*view_tasks)
 
-    for idx, item in enumerate(top15):
+    for idx, item in enumerate(top_ranked):
         item["views"] = views[idx] if isinstance(views[idx], int) else 0
         item["final_score"] = ranker.calculate_final_score(
             ai_score=item.get("deep_score", item.get("ai_score", 50)),
@@ -188,26 +230,30 @@ async def run_free_pipeline(
             year=item.get("year", 0),
         )
 
-    top15.sort(key=lambda x: x.get("final_score", 0), reverse=True)
+    top_ranked.sort(key=lambda x: x.get("final_score", 0), reverse=True)
 
     logger.info("🔍 FREE — Filtering duplicates against existing DB events...")
-    deduped_top15 = deduper.filter_duplicates(top15, tier="FREE")
+    deduped = deduper.filter_duplicates(top_ranked, tier="FREE")
+    deduped = _dedupe_by_slug(deduped, "FREE-final")
 
-    # Defense in depth — dedupe by slug ONE more time
-    deduped_top15 = _dedupe_by_slug(deduped_top15, "FREE-final")
+    if len(deduped) < TARGET_FREE_COUNT:
+        logger.warning(
+            f"⚠️ FREE: only {len(deduped)} non-dup events available "
+            f"(wanted {TARGET_FREE_COUNT})"
+        )
 
-    if not deduped_top15:
-        logger.error("❌ FREE: all top events were duplicates")
+    if not deduped:
+        logger.error("❌ FREE: no non-duplicate events left")
         return [], {
             "free_discovered": len(all_events),
-            "free_after_rank": len(top15),
+            "free_after_validation": len(validated),
             "free_after_dedup": 0,
             "free_final": 0,
         }
 
-    top5 = deduped_top15[:5]
+    top5 = deduped[:TARGET_FREE_COUNT]
 
-    logger.info(f"🏆 FREE TOP 5 (post-dedup, {len(deduped_top15)} non-dup candidates):")
+    logger.info(f"🏆 FREE TOP {len(top5)} (post-dedup, {len(deduped)} non-dup candidates):")
     for i, ev in enumerate(top5):
         logger.info(f"  {i+1}. [{ev['year']}] {ev['text'][:80]} → {ev['final_score']}")
 
@@ -223,8 +269,8 @@ async def run_free_pipeline(
 
     return final_events_list, {
         "free_discovered": len(all_events),
-        "free_after_rank": len(top15),
-        "free_after_dedup": len(deduped_top15),
+        "free_after_validation": len(validated),
+        "free_after_dedup": len(deduped),
         "free_final": len(final_events_list),
         "free_quizzes_ok": sum(1 for q in quizzes if q is not None),
     }
@@ -232,6 +278,7 @@ async def run_free_pipeline(
 
 # ══════════════════════════════════════════════════════════════════
 # PRO PIPELINE
+# Target: 3 events (1 personalities + 1 media + 1 sport), all is_pro=True
 # ══════════════════════════════════════════════════════════════════
 async def run_pro_pipeline(
     today: datetime,
@@ -251,18 +298,52 @@ async def run_pro_pipeline(
         logger.warning("⚠️ PRO: no candidates")
         return [], {"pro_discovered": 0}
 
-    logger.info("🗓️ PRO — Validating dates against Wikipedia 'On this day'...")
-    pro_candidates = await date_validator.validate_events(pro_candidates, today, tier="PRO")
+    original_pool = list(pro_candidates)
 
-    if not pro_candidates:
-        logger.warning("⚠️ PRO: no candidates passed Wikipedia date validation")
-        return [], {"pro_discovered": 0, "pro_after_date_validation": 0}
+    logger.info("🗓️ PRO — Validating dates against Wikipedia...")
+    validated = await date_validator.validate_events(pro_candidates, today, tier="PRO")
+
+    # PRO needs at least 1 per category — backfill per category if validator was too strict
+    pro_cats = ["personalities", "media", "sport"]
+    by_cat_validated = {c: [] for c in pro_cats}
+    for ev in validated:
+        cat = ev.get("category", "").lower()
+        if cat in by_cat_validated:
+            by_cat_validated[cat].append(ev)
+
+    by_cat_original = {c: [] for c in pro_cats}
+    for ev in original_pool:
+        cat = ev.get("category", "").lower()
+        if cat in by_cat_original:
+            by_cat_original[cat].append(ev)
+
+    # Backfill missing categories
+    final_pool = []
+    for cat in pro_cats:
+        cat_validated = by_cat_validated[cat]
+        if not cat_validated and by_cat_original[cat]:
+            # Validator killed all candidates for this category — backfill
+            backfill = sorted(
+                by_cat_original[cat],
+                key=lambda x: x.get("ai_score", 0),
+                reverse=True,
+            )[:3]
+            logger.warning(
+                f"⚠️ PRO [{cat}]: validator rejected all — backfilling {len(backfill)} candidates"
+            )
+            final_pool.extend(backfill)
+        else:
+            final_pool.extend(cat_validated)
+
+    if not final_pool:
+        logger.warning("⚠️ PRO: no candidates available even after backfill")
+        return [], {"pro_discovered": 0, "pro_after_validation": 0}
 
     logger.info("🔍 PRO — Filtering candidates against existing DB events...")
-    pro_candidates_clean = deduper.filter_duplicates(pro_candidates, tier="PRO")
-    pro_candidates_clean = _dedupe_by_slug(pro_candidates_clean, "PRO-clean")
+    pro_clean = deduper.filter_duplicates(final_pool, tier="PRO")
+    pro_clean = _dedupe_by_slug(pro_clean, "PRO-clean")
 
-    if not pro_candidates_clean:
+    if not pro_clean:
         logger.warning("⚠️ PRO: all candidates were duplicates")
         return [], {
             "pro_discovered": len(pro_candidates),
@@ -271,14 +352,14 @@ async def run_pro_pipeline(
         }
 
     logger.info("🔬 PRO — Selecting best event per category...")
-    pro_selected = await processor.deep_rank_pro_per_category(pro_candidates_clean, today)
+    pro_selected = await processor.deep_rank_pro_per_category(pro_clean, today)
     pro_selected = _dedupe_by_slug(pro_selected, "PRO-rank")
 
     if not pro_selected:
-        logger.warning("⚠️ PRO: no events selected")
+        logger.warning("⚠️ PRO: no events selected by ranker")
         return [], {
             "pro_discovered": len(pro_candidates),
-            "pro_after_dedup": len(pro_candidates_clean),
+            "pro_after_dedup": len(pro_clean),
             "pro_final": 0,
         }
 
@@ -296,7 +377,7 @@ async def run_pro_pipeline(
         )
         item["is_pro"] = True
 
-    logger.info("🏆 PRO SELECTED:")
+    logger.info(f"🏆 PRO SELECTED {len(pro_selected)} events:")
     for i, ev in enumerate(pro_selected):
         logger.info(
             f"  {i+1}. [{ev['category']}] [{ev['year']}] "
@@ -315,7 +396,7 @@ async def run_pro_pipeline(
 
     return final_pro_list, {
         "pro_discovered": len(pro_candidates),
-        "pro_after_dedup": len(pro_candidates_clean),
+        "pro_after_dedup": len(pro_clean),
         "pro_selected": len(pro_selected),
         "pro_final": len(final_pro_list),
         "pro_quizzes_ok": sum(1 for q in quizzes if q is not None),
@@ -410,7 +491,7 @@ async def _build_event_details(
 
 
 # ══════════════════════════════════════════════════════════════════
-# MAIN
+# MAIN — orchestrate FREE + PRO, send 5 + 3 = 8 events as ONE payload
 # ══════════════════════════════════════════════════════════════════
 async def main():
     logger.info("🚀 Starting DailyHistory Pipeline (FREE + PRO)...")
@@ -421,7 +502,7 @@ async def main():
     ranker = ScoringEngine()
 
     deduper = EventDeduplicator(similarity_threshold=0.85)
-    date_validator = WikiDateValidator(strict_threshold=0.90)
+    date_validator = WikiDateValidator(fuzzy_slug_threshold=0.90)
 
     today = datetime.now()
 
@@ -442,7 +523,7 @@ async def main():
             logger.error("❌ No events generated — aborting payload send")
             return
 
-        # FINAL safety net: ensure no duplicates between FREE and PRO either
+        # Final cross-tier dedup
         final_seen_urls = set()
         deduped_all = []
         for ev in all_events:
@@ -458,7 +539,7 @@ async def main():
             **free_meta,
             **pro_meta,
             "target_date": str(today.date()),
-            "pipeline": "ai_driven_with_pro_v8_strict_dedup",
+            "pipeline": "ai_driven_v9_with_backfill",
             "total_events": len(all_events),
         }
 
@@ -468,10 +549,13 @@ async def main():
             metadata=combined_metadata,
         )
 
+        free_count = sum(1 for e in all_events if not e.is_pro)
+        pro_count = sum(1 for e in all_events if e.is_pro)
+
         logger.info("━" * 60)
         logger.info(f"📊 FINAL PAYLOAD: {len(all_events)} events total")
-        logger.info(f"   → FREE: {sum(1 for e in all_events if not e.is_pro)} | "
-                    f"PRO: {sum(1 for e in all_events if e.is_pro)}")
+        logger.info(f"   → FREE: {free_count} (target {TARGET_FREE_COUNT}) | "
+                    f"PRO: {pro_count} (target {TARGET_PRO_COUNT})")
         logger.info("━" * 60)
         for i, ev in enumerate(all_events):
             tier = "💎 PRO" if ev.is_pro else "🆓 FREE"
@@ -481,6 +565,16 @@ async def main():
                 f"{ev.year} | {title}"
             )
         logger.info("━" * 60)
+
+        # Warn if we didn't hit targets
+        if free_count < TARGET_FREE_COUNT:
+            logger.warning(
+                f"⚠️ FREE count below target: {free_count}/{TARGET_FREE_COUNT}"
+            )
+        if pro_count < TARGET_PRO_COUNT:
+            logger.warning(
+                f"⚠️ PRO count below target: {pro_count}/{TARGET_PRO_COUNT}"
+            )
 
         await send_to_java(payload)
 
