@@ -1,6 +1,9 @@
+import asyncio
+import time
 import httpx
 import cloudinary
 import cloudinary.uploader
+import cloudinary.exceptions
 from typing import Optional, List
 from core.config import config
 from core.logger import setup_logger
@@ -111,24 +114,60 @@ class WikiScraper:
 
         return valid_urls
 
-    def upload_to_cloudinary(self, image_url: str, public_id: str) -> Optional[str]:
-        """Upload an image URL to Cloudinary with quality/size optimization."""
+    def upload_to_cloudinary(
+        self,
+        image_url: str,
+        public_id: str,
+        max_retries: int = 3,
+    ) -> Optional[str]:
+        """
+        Upload an image URL to Cloudinary with rate-limit handling.
+
+        Optimizations vs. previous version:
+          - ONE eager transformation instead of 4 chained (75% fewer transforms)
+          - Exponential backoff on RateLimited errors
+          - Returns the eager-transformed URL when available
+        """
         if not image_url:
             return None
-        try:
-            result = cloudinary.uploader.upload(
-                image_url,
-                public_id=f"history_app/{public_id}",
-                overwrite=True,
-                transformation=[
-                    {"width": 1920, "height": 1080, "crop": "limit"},
-                    {"width": 1600, "height": 900, "crop": "fill", "gravity": "auto"},
-                    {"quality": "auto:best"},
-                    {"fetch_format": "auto"},
-                    {"dpr": "auto"},
-                ],
-            )
-            return result.get("secure_url")
-        except Exception as e:
-            logger.error(f"⚠️ Cloudinary upload failed: {e}")
-            return None
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                result = cloudinary.uploader.upload(
+                    image_url,
+                    public_id=f"history_app/{public_id}",
+                    overwrite=True,
+                    # Single combined eager transformation
+                    eager=[
+                        {
+                            "width": 1600,
+                            "height": 900,
+                            "crop": "fill",
+                            "gravity": "auto",
+                            "quality": "auto:good",
+                            "fetch_format": "auto",
+                        }
+                    ],
+                    eager_async=False,
+                )
+                eager_urls = result.get("eager", [])
+                if eager_urls:
+                    return eager_urls[0].get("secure_url")
+                return result.get("secure_url")
+
+            except cloudinary.exceptions.RateLimited as e:
+                wait = 2 ** attempt  # 2s, 4s, 8s
+                logger.warning(
+                    f"⏳ Cloudinary rate limited (attempt {attempt}/{max_retries}) "
+                    f"for {public_id} — waiting {wait}s"
+                )
+                time.sleep(wait)
+
+            except Exception as e:
+                logger.error(f"⚠️ Cloudinary upload failed for {public_id}: {e}")
+                return None
+
+        logger.error(
+            f"🚨 Cloudinary: gave up after {max_retries} retries for {public_id}"
+        )
+        return None

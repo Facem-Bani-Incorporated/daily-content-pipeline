@@ -14,6 +14,7 @@ from engine.processor import AIProcessor
 from engine.quiz_generator import QuizGenerator
 from engine.ranker import ScoringEngine
 from engine.social_agent import SocialMediaAgent
+from engine.deduplicator import EventDeduplicator
 from schema.models import DailyPayload, EventDetail, EventCategory, Translations
 
 logger = setup_logger("MainPipeline")
@@ -92,8 +93,16 @@ async def safe_upload(scraper: WikiScraper, url: str, public_id: str):
         return None
 
 
+def _is_wikipedia_url(url: str) -> bool:
+    """Check if URL is from Wikipedia/Wikimedia (already CDN-served, no Cloudinary needed)."""
+    if not url:
+        return False
+    url_lower = url.lower()
+    return "wikipedia.org" in url_lower or "wikimedia.org" in url_lower
+
+
 # ══════════════════════════════════════════════════════════════════
-# FREE PIPELINE — 60 → top 15 → top 5
+# FREE PIPELINE — 60 → top 15 → top 5 (with dedup)
 # ══════════════════════════════════════════════════════════════════
 async def run_free_pipeline(
     today: datetime,
@@ -101,6 +110,7 @@ async def run_free_pipeline(
     scraper: WikiScraper,
     ranker: ScoringEngine,
     quiz_gen: QuizGenerator,
+    deduper: EventDeduplicator,
 ) -> tuple:
     logger.info(f"🆓 FREE — Discovering events for {today.strftime('%B %d')}...")
     all_events = await processor.discover_events(today)
@@ -129,9 +139,23 @@ async def run_free_pipeline(
         )
 
     top15.sort(key=lambda x: x.get("final_score", 0), reverse=True)
-    top5 = top15[:5]
 
-    logger.info("🏆 FREE TOP 5:")
+    # ── DEDUP: filter top15 against DB, then take top 5 ──
+    logger.info("🔍 FREE — Filtering duplicates against existing DB events...")
+    deduped_top15 = deduper.filter_duplicates(top15, tier="FREE")
+
+    if not deduped_top15:
+        logger.error("❌ FREE: all top events were duplicates — no new content available")
+        return [], {
+            "free_discovered": len(all_events),
+            "free_after_rank": len(top15),
+            "free_after_dedup": 0,
+            "free_final": 0,
+        }
+
+    top5 = deduped_top15[:5]
+
+    logger.info(f"🏆 FREE TOP 5 (post-dedup, {len(deduped_top15)} candidates available):")
     for i, ev in enumerate(top5):
         logger.info(f"  {i+1}. [{ev['year']}] {ev['text'][:80]} → {ev['final_score']}")
 
@@ -148,13 +172,14 @@ async def run_free_pipeline(
     return final_events_list, {
         "free_discovered": len(all_events),
         "free_after_rank": len(top15),
+        "free_after_dedup": len(deduped_top15),
         "free_final": len(final_events_list),
         "free_quizzes_ok": sum(1 for q in quizzes if q is not None),
     }
 
 
 # ══════════════════════════════════════════════════════════════════
-# PRO PIPELINE — personalities + media + sport (1 each)
+# PRO PIPELINE — personalities + media + sport (1 each, with dedup)
 # ══════════════════════════════════════════════════════════════════
 async def run_pro_pipeline(
     today: datetime,
@@ -162,6 +187,7 @@ async def run_pro_pipeline(
     scraper: WikiScraper,
     ranker: ScoringEngine,
     quiz_gen: QuizGenerator,
+    deduper: EventDeduplicator,
 ) -> tuple:
     logger.info(f"💎 PRO — Discovering personalities/media/sport for {today.strftime('%B %d')}...")
 
@@ -172,12 +198,28 @@ async def run_pro_pipeline(
         logger.warning("⚠️ PRO: no candidates — skipping PRO pipeline")
         return [], {"pro_discovered": 0}
 
+    # ── DEDUP: filter candidates BEFORE selection so we don't waste a slot on a dup ──
+    logger.info("🔍 PRO — Filtering candidates against existing DB events...")
+    pro_candidates_clean = deduper.filter_duplicates(pro_candidates, tier="PRO")
+
+    if not pro_candidates_clean:
+        logger.warning("⚠️ PRO: all candidates were duplicates — skipping")
+        return [], {
+            "pro_discovered": len(pro_candidates),
+            "pro_after_dedup": 0,
+            "pro_final": 0,
+        }
+
     logger.info("🔬 PRO — Selecting best event per category...")
-    pro_selected = await processor.deep_rank_pro_per_category(pro_candidates, today)
+    pro_selected = await processor.deep_rank_pro_per_category(pro_candidates_clean, today)
 
     if not pro_selected:
         logger.warning("⚠️ PRO: no events selected — skipping")
-        return [], {"pro_discovered": len(pro_candidates), "pro_final": 0}
+        return [], {
+            "pro_discovered": len(pro_candidates),
+            "pro_after_dedup": len(pro_candidates_clean),
+            "pro_final": 0,
+        }
 
     logger.info("📊 PRO — Fetching pageviews...")
     view_tasks = [scraper.fetch_page_views(item.get("slug", "")) for item in pro_selected]
@@ -212,6 +254,7 @@ async def run_pro_pipeline(
 
     return final_pro_list, {
         "pro_discovered": len(pro_candidates),
+        "pro_after_dedup": len(pro_candidates_clean),
         "pro_selected": len(pro_selected),
         "pro_final": len(final_pro_list),
         "pro_quizzes_ok": sum(1 for q in quizzes if q is not None),
@@ -219,7 +262,7 @@ async def run_pro_pipeline(
 
 
 # ══════════════════════════════════════════════════════════════════
-# SHARED — Build EventDetail objects
+# SHARED — Build EventDetail objects (Cloudinary-optimized)
 # ══════════════════════════════════════════════════════════════════
 async def _build_event_details(
     selected_items: list,
@@ -256,14 +299,23 @@ async def _build_event_details(
                 combined_sources.append(w_url)
                 seen_urls.add(w_url)
 
+        # ── Build gallery: bypass Cloudinary for Wikipedia URLs (already optimized) ──
         gallery = []
         for i, url in enumerate(combined_sources):
-            img_url = await safe_upload(
-                scraper, url, f"{tier_tag}_ev_{year}_{slug[:20]}_{i}"
-            )
-            if img_url:
-                gallery.append(img_url)
-            await asyncio.sleep(0.5)
+            if _is_wikipedia_url(url):
+                # Wikipedia/Wikimedia images are already CDN-served and 2000px optimized.
+                # Skip Cloudinary entirely to avoid rate limits.
+                gallery.append(url)
+                logger.info(f"  → Wikipedia URL kept directly (no Cloudinary): {url[:70]}")
+            else:
+                # Pexels and other sources go through Cloudinary for optimization
+                img_url = await safe_upload(
+                    scraper, url, f"{tier_tag}_ev_{year}_{slug[:20]}_{i}"
+                )
+                if img_url:
+                    gallery.append(img_url)
+                    logger.info(f"  → Uploaded via Cloudinary: {img_url[:70]}")
+                await asyncio.sleep(0.5)
 
         try:
             ev_date = today.date().replace(year=year) if year > 0 else today.date()
@@ -311,13 +363,17 @@ async def main():
     quiz_gen = QuizGenerator()
     ranker = ScoringEngine()
 
+    # Single deduplicator instance — loads existing events from DB once,
+    # shared between FREE and PRO pipelines.
+    deduper = EventDeduplicator(similarity_threshold=0.85)
+
     today = datetime.now()
 
     try:
         logger.info("⚡ Launching FREE + PRO pipelines in parallel...")
         (free_events, free_meta), (pro_events, pro_meta) = await asyncio.gather(
-            run_free_pipeline(today, processor, scraper, ranker, quiz_gen),
-            run_pro_pipeline(today, processor, scraper, ranker, quiz_gen),
+            run_free_pipeline(today, processor, scraper, ranker, quiz_gen, deduper),
+            run_pro_pipeline(today, processor, scraper, ranker, quiz_gen, deduper),
         )
 
         # IMPORTANT: Java's upsertDailyContent clears all existing events for
@@ -333,7 +389,7 @@ async def main():
             **free_meta,
             **pro_meta,
             "target_date": str(today.date()),
-            "pipeline": "ai_driven_with_pro_v5",
+            "pipeline": "ai_driven_with_pro_v6_dedup",
             "total_events": len(all_events),
         }
 
