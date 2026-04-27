@@ -15,24 +15,25 @@ class WikiDateValidator:
 
       https://en.wikipedia.org/api/rest_v1/feed/onthisday/{type}/{mm}/{dd}
 
-    This endpoint returns the curated list of events Wikipedia editors
-    have confirmed happened on that calendar day — the most reliable
-    source for date verification.
+    STRICT MODE — a candidate passes ONLY if:
+      1. Its slug appears in the official slug set for that day, OR
+      2. Slug fuzzy-matches an official slug at >= strict_threshold (0.90)
 
-    A candidate passes if ANY of these is true:
-      1. (year, slug) exact match against official entries
-      2. Slug appears in any official entry for that day
-      3. Slug fuzzy-matches an official slug (>= threshold)
-      4. Year matches AND text fuzzy-matches an official entry's text
+    We deliberately DROPPED loose text-based fuzzy matching because it
+    allowed events like "Chernobyl disaster" to pass on April 27 (the
+    actual event was April 26 — Wikipedia mentions it on the 26th OTD,
+    not the 27th).
     """
 
     WIKI_USER_AGENT = (
         "DailyHistoryApp/2.0 (https://dailyhistory.app; contact@dailyhistory.app)"
     )
 
-    def __init__(self, similarity_threshold: float = 0.80):
-        self.threshold = similarity_threshold
-        self._cache: dict = {}  # (month, day) -> validation set
+    def __init__(self, strict_threshold: float = 0.90):
+        # Threshold raised from 0.80 → 0.90: only minor naming variations
+        # (e.g. underscore vs space) should pass the fuzzy check.
+        self.strict_threshold = strict_threshold
+        self._cache: dict = {}
 
     async def _fetch_official_events(self, target_date: datetime) -> dict:
         cache_key = (target_date.month, target_date.day)
@@ -108,11 +109,6 @@ class WikiDateValidator:
         self._cache[cache_key] = result
         return result
 
-    def _fuzzy(self, a: str, b: str) -> float:
-        if not a or not b:
-            return 0.0
-        return SequenceMatcher(None, a.lower().strip()[:200], b.lower().strip()[:200]).ratio()
-
     async def validate_events(
         self, candidates: list, target_date: datetime, tier: str = "FREE"
     ) -> list:
@@ -122,7 +118,6 @@ class WikiDateValidator:
         official = await self._fetch_official_events(target_date)
         slug_set = official["slug_set"]
         year_slug_pairs = official["year_slug_pairs"]
-        entries = official["entries"]
 
         if not slug_set:
             logger.warning(
@@ -136,7 +131,6 @@ class WikiDateValidator:
         for cand in candidates:
             slug = (cand.get("slug") or "").replace(" ", "_")
             year = cand.get("year")
-            text = cand.get("text") or ""
             slug_lower = slug.lower()
 
             if not slug or year is None:
@@ -153,54 +147,42 @@ class WikiDateValidator:
                 logger.warning(f"🚫 [{tier}] Date REJECTED: invalid year {year}")
                 continue
 
-            # 1: Exact (year, slug) match
+            # CHECK 1: Exact (year, slug) match — strongest, instant pass
             if (year_int, slug_lower) in year_slug_pairs:
                 verified.append(cand)
                 continue
 
-            # 2: Slug in official set (year may differ if AI got year wrong)
+            # CHECK 2: Slug appears in official set for this day (any year)
             if slug_lower in slug_set:
                 verified.append(cand)
                 continue
 
-            # 3: Fuzzy slug match
+            # CHECK 3: VERY strict fuzzy slug match (>= 90%)
+            # Only allows things like "Battle_of_X" matching "Battle_of_X_(year)"
             best_slug_score = 0.0
+            best_match = ""
             for off_slug in slug_set:
                 score = SequenceMatcher(None, slug_lower, off_slug).ratio()
                 if score > best_slug_score:
                     best_slug_score = score
-                if score >= self.threshold:
+                    best_match = off_slug
+                if score >= self.strict_threshold:
                     break
 
-            if best_slug_score >= self.threshold:
+            if best_slug_score >= self.strict_threshold:
+                logger.info(
+                    f"✓ [{tier}] Fuzzy slug pass: {slug} ≈ {best_match} ({best_slug_score:.0%})"
+                )
                 verified.append(cand)
                 continue
 
-            # 4: Fuzzy text match against entries with matching year
-            best_text_score = 0.0
-            for entry in entries:
-                if entry["year"] is None:
-                    continue
-                try:
-                    if int(entry["year"]) != year_int:
-                        continue
-                except (ValueError, TypeError):
-                    continue
-                score = self._fuzzy(text, entry["text"])
-                if score > best_text_score:
-                    best_text_score = score
-                if score >= self.threshold:
-                    break
-
-            if best_text_score >= self.threshold:
-                verified.append(cand)
-                continue
-
+            # If neither slug match works, REJECT.
+            # We deliberately do NOT do text-based fuzzy matching anymore —
+            # that's what let "Chernobyl disaster on April 27" slip through.
             rejected_count += 1
             logger.warning(
                 f"🚫 [{tier}] Date REJECTED: {year} {slug} — "
-                f"not in official 'On this day' "
-                f"(best slug {best_slug_score:.0%}, best text {best_text_score:.0%})"
+                f"not in official 'On this day' (best slug match {best_slug_score:.0%})"
             )
 
         logger.info(

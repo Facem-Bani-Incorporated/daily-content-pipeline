@@ -21,6 +21,34 @@ from schema.models import DailyPayload, EventDetail, EventCategory, Translations
 logger = setup_logger("MainPipeline")
 
 
+def _dedupe_by_slug(events: list, label: str = "") -> list:
+    """
+    Remove duplicate events (same slug appearing twice in the same list).
+    Keeps the FIRST occurrence — assumes the list is already sorted by score.
+
+    This protects against the AI returning the same original_id multiple times
+    in deep_rank_and_select, which was producing payloads like:
+      [Abdul Hamid II, Abdul Hamid II, Carabineros, Carabineros, Zambia]
+    """
+    seen_slugs = set()
+    result = []
+    dropped = 0
+    for ev in events:
+        slug = (ev.get("slug") or "").strip()
+        if not slug:
+            continue
+        if slug in seen_slugs:
+            dropped += 1
+            logger.warning(f"🔁 [{label}] In-payload duplicate dropped: {slug}")
+            continue
+        seen_slugs.add(slug)
+        result.append(ev)
+
+    if dropped:
+        logger.info(f"🧹 [{label}] In-payload dedup: {len(result)} unique, {dropped} dropped")
+    return result
+
+
 async def send_to_java(payload: DailyPayload):
     target_url = config.JAVA_BACKEND_URL
     secret = config.INTERNAL_API_SECRET
@@ -102,8 +130,14 @@ def _is_wikipedia_url(url: str) -> bool:
 
 # ══════════════════════════════════════════════════════════════════
 # FREE PIPELINE
-# Filtering pipeline order:
-#   discover → wiki-validate-date → rank → dedup → top5
+# Order:
+#   1. discover
+#   2. wiki-validate-date (strict)
+#   3. dedupe by slug (in-payload)
+#   4. rank
+#   5. dedupe by slug AGAIN (rank can re-introduce dups)
+#   6. dedupe vs DB (cross-day)
+#   7. top 5
 # ══════════════════════════════════════════════════════════════════
 async def run_free_pipeline(
     today: datetime,
@@ -116,13 +150,13 @@ async def run_free_pipeline(
 ) -> tuple:
     logger.info(f"🆓 FREE — Discovering events for {today.strftime('%B %d')}...")
     all_events = await processor.discover_events(today)
-    logger.info(f"📋 FREE got {len(all_events)} validated events")
+    all_events = _dedupe_by_slug(all_events, "FREE-discover")
+    logger.info(f"📋 FREE got {len(all_events)} unique validated events")
 
     if not all_events:
         logger.error("❌ FREE: AI returned no events")
         return [], {"free_discovered": 0}
 
-    # ── WIKI DATE VALIDATION: drop events not in official "On this day" ──
     logger.info("🗓️ FREE — Validating dates against Wikipedia 'On this day'...")
     all_events = await date_validator.validate_events(all_events, today, tier="FREE")
 
@@ -132,8 +166,14 @@ async def run_free_pipeline(
 
     logger.info(f"🔬 FREE — Deep ranking {len(all_events)} events to top 15...")
     top15 = await processor.deep_rank_and_select(all_events, today)
+
+    # Dedupe right after ranking — AI tends to return same ID multiple times
+    top15 = _dedupe_by_slug(top15, "FREE-rank")
+
     if not top15:
+        # Fallback to ai_score if ranking failed entirely
         top15 = sorted(all_events, key=lambda x: x.get("ai_score", 0), reverse=True)[:15]
+        top15 = _dedupe_by_slug(top15, "FREE-rank-fallback")
 
     logger.info("📊 FREE — Fetching pageviews for top 15...")
     view_tasks = [scraper.fetch_page_views(item.get("slug", "")) for item in top15]
@@ -152,6 +192,9 @@ async def run_free_pipeline(
 
     logger.info("🔍 FREE — Filtering duplicates against existing DB events...")
     deduped_top15 = deduper.filter_duplicates(top15, tier="FREE")
+
+    # Defense in depth — dedupe by slug ONE more time
+    deduped_top15 = _dedupe_by_slug(deduped_top15, "FREE-final")
 
     if not deduped_top15:
         logger.error("❌ FREE: all top events were duplicates")
@@ -189,7 +232,6 @@ async def run_free_pipeline(
 
 # ══════════════════════════════════════════════════════════════════
 # PRO PIPELINE
-# Order: discover → wiki-validate-date → dedup → rank → narratives
 # ══════════════════════════════════════════════════════════════════
 async def run_pro_pipeline(
     today: datetime,
@@ -202,13 +244,13 @@ async def run_pro_pipeline(
 ) -> tuple:
     logger.info(f"💎 PRO — Discovering personalities/media/sport for {today.strftime('%B %d')}...")
     pro_candidates = await processor.discover_pro_events(today)
-    logger.info(f"📋 PRO got {len(pro_candidates)} validated candidates")
+    pro_candidates = _dedupe_by_slug(pro_candidates, "PRO-discover")
+    logger.info(f"📋 PRO got {len(pro_candidates)} unique candidates")
 
     if not pro_candidates:
         logger.warning("⚠️ PRO: no candidates")
         return [], {"pro_discovered": 0}
 
-    # ── WIKI DATE VALIDATION ──
     logger.info("🗓️ PRO — Validating dates against Wikipedia 'On this day'...")
     pro_candidates = await date_validator.validate_events(pro_candidates, today, tier="PRO")
 
@@ -216,9 +258,9 @@ async def run_pro_pipeline(
         logger.warning("⚠️ PRO: no candidates passed Wikipedia date validation")
         return [], {"pro_discovered": 0, "pro_after_date_validation": 0}
 
-    # ── DEDUP ──
     logger.info("🔍 PRO — Filtering candidates against existing DB events...")
     pro_candidates_clean = deduper.filter_duplicates(pro_candidates, tier="PRO")
+    pro_candidates_clean = _dedupe_by_slug(pro_candidates_clean, "PRO-clean")
 
     if not pro_candidates_clean:
         logger.warning("⚠️ PRO: all candidates were duplicates")
@@ -230,6 +272,7 @@ async def run_pro_pipeline(
 
     logger.info("🔬 PRO — Selecting best event per category...")
     pro_selected = await processor.deep_rank_pro_per_category(pro_candidates_clean, today)
+    pro_selected = _dedupe_by_slug(pro_selected, "PRO-rank")
 
     if not pro_selected:
         logger.warning("⚠️ PRO: no events selected")
@@ -280,7 +323,7 @@ async def run_pro_pipeline(
 
 
 # ══════════════════════════════════════════════════════════════════
-# SHARED — Build EventDetail (Cloudinary-optimized)
+# SHARED — Build EventDetail
 # ══════════════════════════════════════════════════════════════════
 async def _build_event_details(
     selected_items: list,
@@ -317,7 +360,6 @@ async def _build_event_details(
                 combined_sources.append(w_url)
                 seen_urls.add(w_url)
 
-        # Bypass Cloudinary for Wikipedia URLs (already CDN-served at 2000px)
         gallery = []
         for i, url in enumerate(combined_sources):
             if _is_wikipedia_url(url):
@@ -378,9 +420,8 @@ async def main():
     quiz_gen = QuizGenerator()
     ranker = ScoringEngine()
 
-    # Shared instances — load DB events once, fetch Wikipedia OTD once
     deduper = EventDeduplicator(similarity_threshold=0.85)
-    date_validator = WikiDateValidator(similarity_threshold=0.80)
+    date_validator = WikiDateValidator(strict_threshold=0.90)
 
     today = datetime.now()
 
@@ -401,11 +442,23 @@ async def main():
             logger.error("❌ No events generated — aborting payload send")
             return
 
+        # FINAL safety net: ensure no duplicates between FREE and PRO either
+        final_seen_urls = set()
+        deduped_all = []
+        for ev in all_events:
+            url = str(ev.source_url)
+            if url in final_seen_urls:
+                logger.warning(f"🔁 FINAL dedup: dropped cross-tier dup {url}")
+                continue
+            final_seen_urls.add(url)
+            deduped_all.append(ev)
+        all_events = deduped_all
+
         combined_metadata = {
             **free_meta,
             **pro_meta,
             "target_date": str(today.date()),
-            "pipeline": "ai_driven_with_pro_v7_dedup_dates",
+            "pipeline": "ai_driven_with_pro_v8_strict_dedup",
             "total_events": len(all_events),
         }
 
@@ -417,7 +470,8 @@ async def main():
 
         logger.info("━" * 60)
         logger.info(f"📊 FINAL PAYLOAD: {len(all_events)} events total")
-        logger.info(f"   → FREE: {len(free_events)} | PRO: {len(pro_events)}")
+        logger.info(f"   → FREE: {sum(1 for e in all_events if not e.is_pro)} | "
+                    f"PRO: {sum(1 for e in all_events if e.is_pro)}")
         logger.info("━" * 60)
         for i, ev in enumerate(all_events):
             tier = "💎 PRO" if ev.is_pro else "🆓 FREE"
@@ -432,9 +486,10 @@ async def main():
 
         logger.info("📱 Running Social Media Agent (FREE events only)...")
         try:
-            if free_events:
+            free_only = [e for e in all_events if not e.is_pro]
+            if free_only:
                 social_agent = SocialMediaAgent()
-                await social_agent.generate_and_post(free_events, today)
+                await social_agent.generate_and_post(free_only, today)
             else:
                 logger.warning("⚠️ No FREE events — skipping social agent")
         except Exception as e:
