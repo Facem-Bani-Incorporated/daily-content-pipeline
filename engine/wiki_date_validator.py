@@ -34,8 +34,9 @@ class WikiDateValidator:
         "DailyHistoryApp/2.0 (https://dailyhistory.app; contact@dailyhistory.app)"
     )
 
-    def __init__(self, fuzzy_slug_threshold: float = 0.90):
-        self.fuzzy_slug_threshold = fuzzy_slug_threshold
+    def __init__(self, fuzzy_slug_threshold: float = 0.90, strict_threshold: float = None):
+        # Accept both names for backward compatibility
+        self.fuzzy_slug_threshold = strict_threshold if strict_threshold is not None else fuzzy_slug_threshold
         self._otd_cache: dict = {}
         self._article_cache: dict = {}
 
