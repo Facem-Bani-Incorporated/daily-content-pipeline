@@ -17,32 +17,29 @@ class WikiDateValidator:
       https://en.wikipedia.org/api/rest_v1/feed/onthisday/{type}/{mm}/{dd}
       → If slug appears here, it's INSTANTLY confirmed.
 
-    TIER 2 — Article text scan (catches valid events not in the OTD list):
+    TIER 2 — Article text scan (catches valid events not in OTD):
       For each candidate not in OTD, fetch its Wikipedia article extract
-      and check if "{Month} {day}" appears in the article body.
-      Only confirms if the date phrase is found near the year mentioned.
+      and check if the target date phrase appears in the article body.
 
     TIER 3 — REJECT.
-
-    This catches false positives (AI hallucinations like "X on day Y"
-    when the actual article doesn't mention day Y) while still allowing
-    legitimate but less-famous events that didn't make Wikipedia's
-    curated OTD list.
     """
 
     WIKI_USER_AGENT = (
         "DailyHistoryApp/2.0 (https://dailyhistory.app; contact@dailyhistory.app)"
     )
 
-    def __init__(self, fuzzy_slug_threshold: float = 0.90, strict_threshold: float = None):
-        # Accept both names for backward compatibility
-        self.fuzzy_slug_threshold = strict_threshold if strict_threshold is not None else fuzzy_slug_threshold
+    def __init__(
+        self,
+        fuzzy_slug_threshold: float = 0.90,
+        strict_threshold: float = None,  # backward compat
+    ):
+        # Accept both names; strict_threshold takes priority if provided
+        self.fuzzy_slug_threshold = (
+            strict_threshold if strict_threshold is not None else fuzzy_slug_threshold
+        )
         self._otd_cache: dict = {}
         self._article_cache: dict = {}
 
-    # ──────────────────────────────────────────────────────────
-    # TIER 1: Wikipedia "On this day" official feed
-    # ──────────────────────────────────────────────────────────
     async def _fetch_otd(self, target_date: datetime) -> dict:
         cache_key = (target_date.month, target_date.day)
         if cache_key in self._otd_cache:
@@ -101,9 +98,6 @@ class WikiDateValidator:
         self._otd_cache[cache_key] = result
         return result
 
-    # ──────────────────────────────────────────────────────────
-    # TIER 2: Wikipedia article extract scan
-    # ──────────────────────────────────────────────────────────
     async def _fetch_article_extract(self, slug: str) -> str:
         if slug in self._article_cache:
             return self._article_cache[slug]
@@ -142,27 +136,17 @@ class WikiDateValidator:
     def _date_in_article(
         self, article_text: str, target_date: datetime, year: int
     ) -> tuple:
-        """
-        Check if the target date phrase appears in the article.
-
-        Returns (found: bool, evidence: str).
-        Looks for multiple date format variants:
-          - "April 27, 1986"  (most common in English Wikipedia)
-          - "April 27 1986"   (no comma)
-          - "27 April 1986"   (British style)
-          - "April 27"        (in articles where year is implied)
-        """
         if not article_text:
             return False, "no article text"
 
         text_lower = article_text.lower()
-        month_name = target_date.strftime("%B").lower()  # "april"
+        month_name = target_date.strftime("%B").lower()
         day = target_date.day
         day_str = str(day)
         day_padded = f"{day:02d}"
         year_str = str(year)
 
-        # Strongest patterns: month + day + year together (any order)
+        # Strong patterns: month + day + year together
         strong_patterns = [
             f"{month_name} {day_str}, {year_str}",
             f"{month_name} {day_str} {year_str}",
@@ -175,7 +159,7 @@ class WikiDateValidator:
             if pat in text_lower:
                 return True, f"strong match: '{pat}'"
 
-        # Medium pattern: "Month day" appears AND year appears AND they're close together
+        # Medium: "Month day" appears AND year appears within 200 chars
         date_phrases = [
             f"{month_name} {day_str}",
             f"{day_str} {month_name}",
@@ -184,19 +168,15 @@ class WikiDateValidator:
         for date_phrase in date_phrases:
             idx = text_lower.find(date_phrase)
             while idx != -1:
-                # Check ±200 chars around for the year
                 window_start = max(0, idx - 200)
                 window_end = min(len(text_lower), idx + 200)
                 window = text_lower[window_start:window_end]
                 if year_str in window:
-                    return True, f"proximity match: '{date_phrase}' near {year_str}"
+                    return True, f"proximity: '{date_phrase}' near {year_str}"
                 idx = text_lower.find(date_phrase, idx + 1)
 
         return False, f"no date match for {month_name} {day} + {year_str}"
 
-    # ──────────────────────────────────────────────────────────
-    # MAIN VALIDATION
-    # ──────────────────────────────────────────────────────────
     async def validate_events(
         self, candidates: list, target_date: datetime, tier: str = "FREE"
     ) -> list:
@@ -206,8 +186,6 @@ class WikiDateValidator:
         otd = await self._fetch_otd(target_date)
         slug_set = otd["slug_set"]
 
-        # Step 1: Quick OTD check — events in OTD pass instantly.
-        # Everything else goes to Step 2 (article text scan).
         otd_passed = []
         needs_article_check = []
 
@@ -222,7 +200,6 @@ class WikiDateValidator:
                 otd_passed.append(cand)
                 continue
 
-            # Strict fuzzy slug match (≥ 90%)
             best_score = 0.0
             for off_slug in slug_set:
                 score = SequenceMatcher(None, slug_lower, off_slug).ratio()
@@ -238,11 +215,10 @@ class WikiDateValidator:
             needs_article_check.append(cand)
 
         logger.info(
-            f"🔍 [{tier}] OTD pass: {len(otd_passed)}, "
-            f"needs article check: {len(needs_article_check)}"
+            f"🔍 [{tier}] OTD instant pass: {len(otd_passed)}, "
+            f"article check: {len(needs_article_check)}"
         )
 
-        # Step 2: For everything not in OTD, fetch the article and look for the date.
         article_passed = []
         rejected_count = 0
 
@@ -255,7 +231,7 @@ class WikiDateValidator:
             try:
                 year_int = int(year)
             except (ValueError, TypeError):
-                return cand, False, f"invalid year: {year}"
+                return cand, False, f"invalid year"
 
             extract = await self._fetch_article_extract(slug)
             if not extract:
@@ -264,14 +240,13 @@ class WikiDateValidator:
             found, reason = self._date_in_article(extract, target_date, year_int)
             return cand, found, reason
 
-        # Run article checks in parallel (limit concurrency)
         sem = asyncio.Semaphore(5)
 
-        async def bounded_check(cand):
+        async def bounded(cand):
             async with sem:
                 return await check_article(cand)
 
-        results = await asyncio.gather(*[bounded_check(c) for c in needs_article_check])
+        results = await asyncio.gather(*[bounded(c) for c in needs_article_check])
 
         for cand, ok, reason in results:
             if ok:
@@ -291,7 +266,7 @@ class WikiDateValidator:
 
         logger.info(
             f"✅ [{tier}] Date validation: {len(verified)} verified "
-            f"({len(otd_passed)} via OTD, {len(article_passed)} via article scan), "
+            f"({len(otd_passed)} OTD + {len(article_passed)} article scan), "
             f"{rejected_count} rejected (out of {len(candidates)})"
         )
         return verified
