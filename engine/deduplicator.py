@@ -15,7 +15,9 @@ class EventDeduplicator:
       1. Exact source_url (Wikipedia slug) — strongest signal
       2. Same year + fuzzy title match (>= threshold similarity)
 
-    Loads existing events from PostgreSQL once per pipeline run.
+    Connection strategy (in priority order):
+      1. DATABASE_URL  (preferred — single connection string)
+      2. PG* env vars  (fallback — PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE)
     """
 
     def __init__(self, similarity_threshold: float = 0.85):
@@ -23,15 +25,37 @@ class EventDeduplicator:
         self._existing_cache = None  # lazy-loaded once per pipeline run
 
     def _get_connection(self):
+        # Strategy 1: DATABASE_URL (Railway "Add Reference" puts it here)
         db_url = os.environ.get("DATABASE_URL")
-        if not db_url:
-            raise RuntimeError("DATABASE_URL not set in environment")
-        return psycopg2.connect(db_url)
+        if db_url:
+            return psycopg2.connect(db_url)
+
+        # Strategy 2: build from PG* env vars (fallback)
+        pg_host = os.environ.get("PGHOST")
+        pg_port = os.environ.get("PGPORT", "5432")
+        pg_user = os.environ.get("PGUSER")
+        pg_password = os.environ.get("PGPASSWORD")
+        pg_database = os.environ.get("PGDATABASE")
+
+        if all([pg_host, pg_user, pg_password, pg_database]):
+            logger.info(f"📡 Using PG* vars to connect (host={pg_host})")
+            return psycopg2.connect(
+                host=pg_host,
+                port=pg_port,
+                user=pg_user,
+                password=pg_password,
+                dbname=pg_database,
+            )
+
+        raise RuntimeError(
+            "No database credentials found. Set DATABASE_URL or "
+            "PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE in environment."
+        )
 
     def _load_existing_events(self) -> list:
         """
         Load all existing events from DB once.
-        Returns a list of (source_url, year, title_en) tuples.
+        Returns list of (source_url, year, title_en) tuples.
         """
         if self._existing_cache is not None:
             return self._existing_cache
@@ -39,7 +63,6 @@ class EventDeduplicator:
         try:
             conn = self._get_connection()
             cur = conn.cursor()
-            # Try the JSON column approach first (most common with Spring Boot + Hibernate)
             try:
                 cur.execute("""
                     SELECT source_url,
@@ -49,7 +72,6 @@ class EventDeduplicator:
                 """)
                 rows = cur.fetchall()
             except Exception as schema_err:
-                # Fallback: maybe titles are in a separate table
                 logger.warning(
                     f"⚠️ Primary dedup query failed ({schema_err}) — trying fallback schema"
                 )
@@ -73,33 +95,24 @@ class EventDeduplicator:
             return []
 
     def _normalize_url(self, slug: str) -> str:
-        """Build the same Wikipedia URL format the pipeline writes to DB."""
         if not slug:
             return ""
         return f"https://en.wikipedia.org/wiki/{slug}"
 
     def _is_duplicate(self, item: dict, existing: list) -> tuple:
-        """
-        Check if `item` matches any existing event.
-        Returns (is_dup: bool, reason: str).
-        """
         slug = item.get("slug", "")
         year = item.get("year", 0)
-        # Title can come from either 'titles' dict (after deep_rank) or 'text' (raw discovery)
         title_en = (
             (item.get("titles") or {}).get("en")
             or item.get("text", "")[:80]
         )
         title_en = (title_en or "").strip()
-
         candidate_url = self._normalize_url(slug)
 
         for existing_url, existing_year, existing_title in existing:
-            # Rule 1: exact Wikipedia URL match (strongest signal)
             if existing_url and candidate_url and candidate_url == existing_url:
                 return True, f"Same Wikipedia URL: {slug}"
 
-            # Rule 2: same year + fuzzy title match
             if (
                 existing_year == year
                 and existing_title
@@ -120,17 +133,6 @@ class EventDeduplicator:
         return False, ""
 
     def filter_duplicates(self, events: list, tier: str = "FREE") -> list:
-        """
-        Filter out events that already exist in the database.
-        Pass the full event dicts (with 'slug', 'year', 'titles', 'text').
-
-        Args:
-            events: list of event dicts from the pipeline
-            tier: "FREE" or "PRO" — used for logging only
-
-        Returns:
-            list of events that are NOT duplicates
-        """
         if not events:
             return []
 

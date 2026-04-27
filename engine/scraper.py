@@ -23,7 +23,6 @@ class WikiScraper:
         )
 
     async def fetch_page_views(self, title_slug: str) -> int:
-        """Fetch 30-day Wikipedia page views for a given article slug."""
         if not title_slug:
             return 0
 
@@ -47,7 +46,6 @@ class WikiScraper:
         return 0
 
     async def fetch_pro_image(self, query: str) -> Optional[str]:
-        """Fetch a high-quality image from Pexels for the given query."""
         if not self.pexels_key:
             return None
 
@@ -65,7 +63,6 @@ class WikiScraper:
         return None
 
     async def _get_optimized_wiki_url(self, file_name: str) -> Optional[str]:
-        """Resolve a Wikipedia File: title to a 2000px-wide optimized image URL."""
         file_clean = file_name.replace("File:", "").replace(" ", "_")
         api_url = (
             f"https://en.wikipedia.org/w/api.php"
@@ -83,11 +80,6 @@ class WikiScraper:
             return None
 
     async def fetch_gallery_urls(self, title_slug: str, limit: int = 3) -> List[str]:
-        """
-        Fetch up to `limit` clean image URLs from a Wikipedia article.
-        The slug comes directly from the AI — no feed dependency.
-        Filters out SVGs, maps, flags, and GIFs.
-        """
         valid_urls = []
         slug_clean = title_slug.replace(" ", "_")
         wiki_media_url = f"{config.WIKI_BASE_URL}/page/media-list/{slug_clean}"
@@ -121,12 +113,10 @@ class WikiScraper:
         max_retries: int = 3,
     ) -> Optional[str]:
         """
-        Upload an image URL to Cloudinary with rate-limit handling.
-
-        Optimizations vs. previous version:
-          - ONE eager transformation instead of 4 chained (75% fewer transforms)
-          - Exponential backoff on RateLimited errors
-          - Returns the eager-transformed URL when available
+        Upload to Cloudinary with rate-limit handling.
+        Optimizations:
+          - SINGLE eager transformation (vs 4 chained before)
+          - Exponential backoff on RateLimited
         """
         if not image_url:
             return None
@@ -137,7 +127,6 @@ class WikiScraper:
                     image_url,
                     public_id=f"history_app/{public_id}",
                     overwrite=True,
-                    # Single combined eager transformation
                     eager=[
                         {
                             "width": 1600,
@@ -155,8 +144,8 @@ class WikiScraper:
                     return eager_urls[0].get("secure_url")
                 return result.get("secure_url")
 
-            except cloudinary.exceptions.RateLimited as e:
-                wait = 2 ** attempt  # 2s, 4s, 8s
+            except cloudinary.exceptions.RateLimited:
+                wait = 2 ** attempt  # 2, 4, 8s
                 logger.warning(
                     f"⏳ Cloudinary rate limited (attempt {attempt}/{max_retries}) "
                     f"for {public_id} — waiting {wait}s"
@@ -167,7 +156,5 @@ class WikiScraper:
                 logger.error(f"⚠️ Cloudinary upload failed for {public_id}: {e}")
                 return None
 
-        logger.error(
-            f"🚨 Cloudinary: gave up after {max_retries} retries for {public_id}"
-        )
+        logger.error(f"🚨 Cloudinary: gave up after {max_retries} retries for {public_id}")
         return None
