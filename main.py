@@ -21,12 +21,12 @@ from schema.models import DailyPayload, EventDetail, EventCategory, Translations
 logger = setup_logger("MainPipeline")
 
 # How many events we want at the end of each pipeline
-TARGET_FREE_COUNT = 5
-TARGET_PRO_COUNT = 3  # 1 per category (personalities, media, sport)
+TARGET_FREE_COUNT = 6
+TARGET_PRO_COUNT = 4  # 1 personalities + 1 media + 1 sport + 1 extra (best-of-the-rest)
 
 # Minimum acceptable count before we fall back to non-validated events
-MIN_FREE_COUNT = 5
-MIN_PRO_COUNT = 3
+MIN_FREE_COUNT = 6
+MIN_PRO_COUNT = 4
 
 
 def _dedupe_by_slug(events: list, label: str = "") -> list:

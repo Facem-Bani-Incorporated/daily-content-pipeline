@@ -249,6 +249,12 @@ ALLOWED: {pro_cats}
     # PRO RANK
     # ══════════════════════════════════════════════════════════════
     async def deep_rank_pro_per_category(self, candidates: list, target_date: datetime) -> list:
+        """
+        Selects 4 PRO events:
+          - 1 event from each of the 3 categories (personalities, media, sport)
+          - 1 EXTRA event (the next-best one across all categories)
+        Total: 4 events, with at least 1 per category guaranteed.
+        """
         if not candidates:
             return []
 
@@ -276,10 +282,13 @@ ALLOWED: {pro_cats}
 
         prompt = f"""
 You are a premium content curator for a history app's PAID TIER.
-For {date_str}, select the SINGLE MOST COMPELLING event from EACH category.
+For {date_str}, select 4 events total:
+  - 1 BEST event from EACH of the 3 categories (personalities, media, sport)
+  - 1 EXTRA event (the next-best one, from any category)
+
+That's 4 events total. The extra must be different from the 3 main picks.
 
 CRITERIA: global fame, storytelling potential, emotional impact, shareability.
-OUTPUT: 1 event per category (personalities, media, sport).
 
 STRICT JSON:
 {{
@@ -288,7 +297,29 @@ STRICT JSON:
       "original_id": "ID_0",
       "category": "personalities",
       "deep_score": 92,
+      "is_extra": false,
       "titles": {{ "en": "...", "ro": "...", "es": "...", "de": "...", "fr": "..." }}
+    }},
+    {{
+      "original_id": "ID_3",
+      "category": "media",
+      "deep_score": 88,
+      "is_extra": false,
+      "titles": {{ ... }}
+    }},
+    {{
+      "original_id": "ID_8",
+      "category": "sport",
+      "deep_score": 85,
+      "is_extra": false,
+      "titles": {{ ... }}
+    }},
+    {{
+      "original_id": "ID_2",
+      "category": "personalities",
+      "deep_score": 90,
+      "is_extra": true,
+      "titles": {{ ... }}
     }}
   ]
 }}
@@ -300,12 +331,22 @@ CANDIDATES:
         res = await self._safe_groq_call(prompt, "PRO Deep Rank", {"selections": []})
 
         selected = []
-        seen_cats = set()
+        seen_ids = set()
+        cats_filled = set()  # tracks which of the 3 main category slots are filled
+
+        # First pass: fill the 3 main category slots (1 per category)
         for entry in res.get("selections", []):
             original_id = entry.get("original_id")
             cat = entry.get("category", "").lower()
+            is_extra = entry.get("is_extra", False)
 
-            if original_id not in id_map or cat in seen_cats:
+            if is_extra:
+                continue  # handle extras after main slots
+            if original_id not in id_map or original_id in seen_ids:
+                continue
+            if cat not in {"personalities", "media", "sport"}:
+                continue
+            if cat in cats_filled:
                 continue
 
             item = id_map[original_id]
@@ -315,23 +356,84 @@ CANDIDATES:
                 "is_pro": True,
             })
             selected.append(item)
-            seen_cats.add(cat)
+            seen_ids.add(original_id)
+            cats_filled.add(cat)
 
+        # Fallback: fill any missing main category from highest ai_score in that bucket
         for cat_name in ["personalities", "media", "sport"]:
-            if cat_name in seen_cats:
+            if cat_name in cats_filled:
                 continue
-            pool = sorted(buckets[cat_name], key=lambda x: x.get("ai_score", 0), reverse=True)
-            if pool:
-                fallback = pool[0]
-                fallback.update({
-                    "deep_score": fallback.get("ai_score", 50),
+            pool = sorted(
+                [c for c in buckets[cat_name] if f"ID_{list(id_map.values()).index(c)}" not in seen_ids]
+                if buckets[cat_name] else [],
+                key=lambda x: x.get("ai_score", 0),
+                reverse=True,
+            )
+            # Simpler fallback — just take the top of the bucket if not already picked
+            for cand in sorted(buckets[cat_name], key=lambda x: x.get("ai_score", 0), reverse=True):
+                cand_id = next((k for k, v in id_map.items() if v is cand), None)
+                if cand_id and cand_id not in seen_ids:
+                    cand.update({
+                        "deep_score": cand.get("ai_score", 50),
+                        "titles": self._ensure_langs({}),
+                        "is_pro": True,
+                    })
+                    selected.append(cand)
+                    seen_ids.add(cand_id)
+                    cats_filled.add(cat_name)
+                    logger.warning(f"⚠️ PRO fallback for '{cat_name}': {cand['slug']}")
+                    break
+
+        # Second pass: add the EXTRA (4th event)
+        extra_added = False
+        for entry in res.get("selections", []):
+            if not entry.get("is_extra", False):
+                continue
+            original_id = entry.get("original_id")
+            if original_id not in id_map or original_id in seen_ids:
+                continue
+
+            item = id_map[original_id]
+            item.update({
+                "deep_score": entry.get("deep_score", 50),
+                "titles": self._ensure_langs(entry.get("titles", {})),
+                "is_pro": True,
+            })
+            selected.append(item)
+            seen_ids.add(original_id)
+            extra_added = True
+            logger.info(f"⭐ PRO extra added: [{item.get('category')}] {item.get('slug')}")
+            break  # only one extra
+
+        # Fallback for extra: pick highest-score remaining candidate
+        if not extra_added:
+            remaining = []
+            for cat_name in ["personalities", "media", "sport"]:
+                for cand in buckets[cat_name]:
+                    cand_id = next((k for k, v in id_map.items() if v is cand), None)
+                    if cand_id and cand_id not in seen_ids:
+                        remaining.append((cand, cand_id))
+
+            if remaining:
+                remaining.sort(key=lambda x: x[0].get("ai_score", 0), reverse=True)
+                cand, cand_id = remaining[0]
+                cand.update({
+                    "deep_score": cand.get("ai_score", 50),
                     "titles": self._ensure_langs({}),
                     "is_pro": True,
                 })
-                selected.append(fallback)
-                logger.warning(f"⚠️ PRO fallback for '{cat_name}': {fallback['slug']}")
+                selected.append(cand)
+                seen_ids.add(cand_id)
+                logger.warning(
+                    f"⚠️ PRO extra fallback: [{cand.get('category')}] {cand['slug']}"
+                )
 
-        logger.info(f"🏆 PRO selected {len(selected)} events")
+        # Log summary
+        by_cat = {}
+        for ev in selected:
+            c = ev.get("category", "?")
+            by_cat[c] = by_cat.get(c, 0) + 1
+        logger.info(f"🏆 PRO selected {len(selected)} events → {by_cat}")
         return selected
 
     # ══════════════════════════════════════════════════════════════
