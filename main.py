@@ -491,29 +491,32 @@ async def _build_event_details(
 
 
 # ══════════════════════════════════════════════════════════════════
-# MAIN — orchestrate FREE + PRO, send 5 + 3 = 8 events as ONE payload
+# CORE — run FREE + PRO for a single date and send to Java
 # ══════════════════════════════════════════════════════════════════
-async def main():
-    logger.info("🚀 Starting DailyHistory Pipeline (FREE + PRO)...")
-
-    scraper = WikiScraper()
-    processor = AIProcessor()
-    quiz_gen = QuizGenerator()
-    ranker = ScoringEngine()
-
+async def run_pipeline_for_date(
+    target_date: datetime,
+    scraper: WikiScraper,
+    processor: AIProcessor,
+    quiz_gen: QuizGenerator,
+    ranker: ScoringEngine,
+    run_social: bool = False,
+) -> bool:
+    """
+    Run the full FREE + PRO pipeline for `target_date`.
+    Creates fresh deduper/validator so each date gets a clean DB snapshot.
+    Returns True if payload was sent successfully.
+    """
     deduper = EventDeduplicator(similarity_threshold=0.85)
     date_validator = WikiDateValidator(fuzzy_slug_threshold=0.90)
-
-    today = datetime.now()
 
     try:
         logger.info("⚡ Launching FREE + PRO pipelines in parallel...")
         (free_events, free_meta), (pro_events, pro_meta) = await asyncio.gather(
             run_free_pipeline(
-                today, processor, scraper, ranker, quiz_gen, deduper, date_validator
+                target_date, processor, scraper, ranker, quiz_gen, deduper, date_validator
             ),
             run_pro_pipeline(
-                today, processor, scraper, ranker, quiz_gen, deduper, date_validator
+                target_date, processor, scraper, ranker, quiz_gen, deduper, date_validator
             ),
         )
 
@@ -521,7 +524,7 @@ async def main():
 
         if not all_events:
             logger.error("❌ No events generated — aborting payload send")
-            return
+            return False
 
         # Final cross-tier dedup
         final_seen_urls = set()
@@ -552,13 +555,13 @@ async def main():
         combined_metadata = {
             **free_meta,
             **pro_meta,
-            "target_date": str(today.date()),
+            "target_date": str(target_date.date()),
             "pipeline": "ai_driven_v9_with_backfill",
             "total_events": len(all_events),
         }
 
         payload = DailyPayload(
-            date_processed=today.date(),
+            date_processed=target_date.date(),
             events=all_events,
             metadata=combined_metadata,
         )
@@ -567,7 +570,7 @@ async def main():
         pro_count = sum(1 for e in all_events if e.is_pro)
 
         logger.info("━" * 60)
-        logger.info(f"📊 FINAL PAYLOAD: {len(all_events)} events total")
+        logger.info(f"📊 FINAL PAYLOAD [{target_date.date()}]: {len(all_events)} events total")
         logger.info(f"   → FREE: {free_count} (target {TARGET_FREE_COUNT}) | "
                     f"PRO: {pro_count} (target {TARGET_PRO_COUNT})")
         logger.info("━" * 60)
@@ -580,31 +583,68 @@ async def main():
             )
         logger.info("━" * 60)
 
-        # Warn if we didn't hit targets
         if free_count < TARGET_FREE_COUNT:
-            logger.warning(
-                f"⚠️ FREE count below target: {free_count}/{TARGET_FREE_COUNT}"
-            )
+            logger.warning(f"⚠️ FREE count below target: {free_count}/{TARGET_FREE_COUNT}")
         if pro_count < TARGET_PRO_COUNT:
-            logger.warning(
-                f"⚠️ PRO count below target: {pro_count}/{TARGET_PRO_COUNT}"
-            )
+            logger.warning(f"⚠️ PRO count below target: {pro_count}/{TARGET_PRO_COUNT}")
 
         await send_to_java(payload)
 
-        logger.info("📱 Running Social Media Agent (FREE events only)...")
-        try:
-            free_only = [e for e in all_events if not e.is_pro]
-            if free_only:
-                social_agent = SocialMediaAgent()
-                await social_agent.generate_and_post(free_only, today)
-            else:
-                logger.warning("⚠️ No FREE events — skipping social agent")
-        except Exception as e:
-            logger.error(f"⚠️ Social Media Agent failed (non-critical): {e}")
+        if run_social:
+            logger.info("📱 Running Social Media Agent (FREE events only)...")
+            try:
+                free_only = [e for e in all_events if not e.is_pro]
+                if free_only:
+                    social_agent = SocialMediaAgent()
+                    await social_agent.generate_and_post(free_only, target_date)
+                else:
+                    logger.warning("⚠️ No FREE events — skipping social agent")
+            except Exception as e:
+                logger.error(f"⚠️ Social Media Agent failed (non-critical): {e}")
+
+        return True
 
     except Exception as e:
-        logger.error(f"🚨 Pipeline Crash: {e}", exc_info=True)
+        logger.error(f"🚨 Pipeline Crash for {target_date.date()}: {e}", exc_info=True)
+        return False
+
+
+# ══════════════════════════════════════════════════════════════════
+# MAIN — process today + next 2 days, skip dates that already exist
+# ══════════════════════════════════════════════════════════════════
+async def main():
+    logger.info("🚀 Starting DailyHistory Pipeline (FREE + PRO) — 3-day window...")
+
+    scraper = WikiScraper()
+    processor = AIProcessor()
+    quiz_gen = QuizGenerator()
+    ranker = ScoringEngine()
+
+    today = datetime.now()
+    dates_to_process = [today + timedelta(days=i) for i in range(3)]
+
+    for i, target_date in enumerate(dates_to_process):
+        label = ["TODAY", "TOMORROW", "DAY AFTER"][i]
+        logger.info(f"\n{'═' * 60}")
+        logger.info(f"📅 Processing {label}: {target_date.date()}")
+        logger.info(f"{'═' * 60}")
+
+        # Check if events already exist for this calendar day
+        checker = EventDeduplicator()
+        if checker.has_events_for_date(target_date.date()):
+            logger.info(f"⏭️  {label} ({target_date.date()}) already has events — skipping")
+            continue
+
+        await run_pipeline_for_date(
+            target_date=target_date,
+            scraper=scraper,
+            processor=processor,
+            quiz_gen=quiz_gen,
+            ranker=ranker,
+            run_social=(i == 0),  # Social media only for today
+        )
+
+    logger.info("\n✅ 3-day pipeline window complete.")
 
 
 if __name__ == "__main__":

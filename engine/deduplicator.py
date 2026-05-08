@@ -132,6 +132,30 @@ class EventDeduplicator:
 
         return False, ""
 
+    def has_events_for_date(self, target_date) -> bool:
+        """Check if the DB already has events for this calendar day (month+day)."""
+        try:
+            conn = self._get_connection()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM events
+                WHERE EXTRACT(MONTH FROM event_date) = %s
+                  AND EXTRACT(DAY FROM event_date) = %s
+                """,
+                (target_date.month, target_date.day),
+            )
+            count = cur.fetchone()[0]
+            cur.close()
+            conn.close()
+            logger.info(
+                f"📅 Date check {target_date}: {count} events found in DB"
+            )
+            return count > 0
+        except Exception as e:
+            logger.warning(f"⚠️ Could not check events for {target_date}: {e} — will process anyway")
+            return False
+
     def filter_duplicates(self, events: list, tier: str = "FREE") -> list:
         if not events:
             return []
