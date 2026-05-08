@@ -90,6 +90,8 @@ class WikiScraper:
                 if res.status_code == 200:
                     items = res.json().get("items", [])
                     for item in items:
+                        if len(valid_urls) >= limit:
+                            break
                         title_lower = item.get("title", "").lower()
                         is_image = item.get("type") == "image"
                         is_clean = not any(
@@ -97,10 +99,10 @@ class WikiScraper:
                         )
                         if is_image and is_clean:
                             opt_url = await self._get_optimized_wiki_url(item.get("title"))
-                            if opt_url:
+                            if opt_url and len(opt_url) <= 255:
                                 valid_urls.append(opt_url)
-                        if len(valid_urls) >= limit:
-                            break
+                            elif opt_url:
+                                logger.warning(f"Skipping URL too long ({len(opt_url)} chars): {opt_url[:80]}...")
             except Exception as e:
                 logger.error(f"Gallery fetch error for '{title_slug}': {e}")
 
