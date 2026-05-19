@@ -27,73 +27,69 @@ class AIProcessor:
             {
                 "name": "SCENE_SETTING",
                 "instruction": (
-                    "Lead with an EXACT DURATION — how long something had been building, waiting, or standing "
-                    "before this moment. The first sentence must be a short punchy duration fact (e.g. '28 years. "
-                    "That is how long the wall had divided Berlin.'). Then place the reader in the exact time and "
-                    "location within the next sentence. Make the duration feel personal — not just historical."
+                    "Emphasize the physical world just before this happened. "
+                    "Put the reader in the place — the weather, the room, the street, what people could see and hear. "
+                    "Show how ordinary the moment looked before it became historic. "
+                    "Use duration and elapsed time as anchors: how long something had been building."
                 ),
             },
             {
                 "name": "HUMAN_FOCUS",
                 "instruction": (
-                    "Lead with the person's AGE or a BIOGRAPHICAL NUMBER at the time of the event. "
-                    "First sentence: short, punchy age or personal stat (e.g. '38 years old. That was Neil Armstrong "
-                    "when he stepped onto the Moon.' or '52 years old, and Ray Kroc had never run a restaurant.'). "
-                    "Anchor date and place in the next sentence. Make the reader feel the human scale of the story."
+                    "Center the story on the people — their ages, backgrounds, what they wanted and feared. "
+                    "Include the unknown figures present alongside the famous ones. "
+                    "Make the reader feel the human scale: this was not 'history,' it was specific people "
+                    "making specific decisions on a specific day."
                 ),
             },
             {
                 "name": "THE_BIG_MOMENT",
                 "instruction": (
-                    "Lead with the EXACT TIME OF DAY, a precise countdown, or a sequence number — the smallest "
-                    "unit of time that captures the moment (e.g. '8:15 AM.' or '12 seconds.' or 'The 3rd attempt.'). "
-                    "First sentence: the time or count, nothing else — then immediately name the date and place. "
-                    "Then zoom into what happened in that precise instant."
+                    "Slow down on the exact moment itself. Use present tense. Be precise about sequence. "
+                    "What happened first, what happened next, who moved, who spoke, what was the order of events. "
+                    "If there's a known exact time, use it. The reader should feel like a witness."
                 ),
             },
             {
                 "name": "WHY_IT_MATTERED",
                 "instruction": (
-                    "Lead with the SCALE NUMBER — how many people were affected, how much money was at stake, "
-                    "how many countries changed course (e.g. '240,000 people.' or '$1 billion.' or '47 nations.'). "
-                    "First sentence: just the number and what it represents — under 10 words. "
-                    "Then anchor date and location. Then explain why that scale had to be understood immediately."
+                    "Focus on consequences and scale: how many people were affected, what changed, for whom and how much. "
+                    "Spend more time on the aftermath than the event itself. "
+                    "Let the ripple effects — weeks, years, decades later — carry the weight of the story."
                 ),
             },
             {
                 "name": "THE_CONTRAST",
                 "instruction": (
-                    "Lead with the BEFORE/AFTER RATIO or percentage — what changed numerically from one day to the next "
-                    "(e.g. '1 hour earlier, it was a normal Tuesday.' or 'In 47 seconds, a city of 1 million lost everything.'). "
-                    "First sentence: the contrast stated as a number or time-gap — sharp and short. "
-                    "Anchor date and place in sentence two. Then show the normal life that existed right before."
+                    "Show the before and after. What did the world look like the day before this happened? "
+                    "What was normal, expected, assumed to be permanent? "
+                    "Then show how completely and quickly that changed. "
+                    "The contrast is the story — not just the event."
                 ),
             },
             {
                 "name": "THE_NUMBERS_TELL",
                 "instruction": (
-                    "Lead with THE SINGLE MOST STRIKING NUMBER of the entire event — the one that makes readers stop. "
-                    "First sentence: the number alone, or with minimal context — under 10 words. "
-                    "Then anchor date and location. Use numbers throughout this narrative more than any other angle — "
-                    "each paragraph must contain at least one figure, stat, or measurement."
+                    "Let measurements, statistics, and figures carry the narrative. "
+                    "Every paragraph should have at least one number that proves something. "
+                    "Not decoration — evidence. Distances, costs, casualties, durations, temperatures, ages. "
+                    "The numbers should make the scale visceral, not abstract."
                 ),
             },
             {
                 "name": "THE_WORLD_CHANGED",
                 "instruction": (
-                    "Lead with HOW MANY YEARS or CENTURIES had passed since the last time this happened — or that it "
-                    "was the FIRST TIME EVER in a number of years (e.g. '3,000 years of trying. Then it finally worked.' "
-                    "or 'For 400 years, no human had done this.'). First sentence: the time-span — short and astonishing. "
-                    "Then show what made this particular day the one that broke the record."
+                    "Frame it as a before/after in human understanding or capability. "
+                    "What was impossible or unimaginable before this day? What became ordinary after? "
+                    "Show the long arc: what took centuries to build, and what this event broke or created."
                 ),
             },
             {
                 "name": "THE_STORY_BEHIND",
                 "instruction": (
-                    "Lead with A LESSER-KNOWN NUMBER that reveals the hidden backstory — something that reframes "
-                    "what most people think they know (e.g. '17 rejections.' or 'The patent cost $15.' or '3 days before "
-                    "anyone noticed.'). First sentence: the surprising number — under 10 words. "
-                    "Anchor date and place in sentence two. Then unfold the backstory that the number unlocks."
+                    "Lead with what most people don't know about this event. "
+                    "The backstory, the hidden cause, the forgotten figure, the decision nobody remembers. "
+                    "Reframe the familiar headline with the detail that changes its meaning entirely."
                 ),
             },
         ]
@@ -556,86 +552,48 @@ CANDIDATES:
 
         for attempt in range(1, max_retries + 1):
             prompt = f"""
-You are a senior journalist writing a long-form feature for a history magazine.
-Your editor gave you 1,500 words and full freedom. The audience: curious adults
-who want to actually understand what happened — not just what, but why, how, and
-what it meant. Write the whole piece in {lang_full}.
+You are a journalist writing a short feature for a history magazine.
+One article, one event, around 700 words. The audience is a curious adult who knows
+the headline but wants to actually understand what happened and why it matters.
+Write in {lang_full}.
 
 EVENT: {year} — {text}
 WIKIPEDIA: {slug}
 DATE: {date_str}, {year}
 LOCATION: {location}
 
-ANGLE: {angle['name']}
+EDITORIAL LENS: {angle['name']}
 {angle['instruction']}
 
-THE STORY ARC:
-A great feature follows the logic of the event, not a template. But it always has:
+WHAT THE PIECE NEEDS:
+Open with something that makes the reader want to keep going — a scene, a fact,
+a surprising detail, a quote. Not a formula. The opening should feel like the most
+interesting sentence you know about this event.
 
-1. AN OPENING THAT EARNS ATTENTION
-   Start with a single striking number or fact — under 10 words, drop-cap style.
-   Then immediately put the reader somewhere: a room, a field, a ship, a lab.
-   Who is there? What do they see? What do they not yet know?
+Then tell the story in a straight line: what was the situation before,
+what happened, what it meant. Include the science or mechanics if it's a discovery
+or invention — explain it simply, without jargon. Include the human side:
+who were the real people involved, what did they want, what did they risk?
 
-2. THE SCENE AND THE PEOPLE
-   Spend real time here. Who were the main figures — their age, background,
-   what they wanted, what they feared. The unknown people matter too.
-   What did the world look like just before this happened?
-   What were the forces, pressures, and mistakes that led to this exact day?
+Weave in specific numbers and facts throughout — ages, distances, dates, costs,
+casualties, durations. Not as a list, but as proof embedded in the prose.
+"Many people died" tells nothing. "Of the 300 who entered, 11 walked out" tells everything.
 
-3. THE SCIENCE, MECHANICS, OR LOGIC OF WHAT HAPPENED
-   This is what makes a story educational, not just dramatic.
-   If it was a battle — what was the actual tactical situation, the terrain, the numbers?
-   If it was a discovery — what is the underlying science, what did they prove, how?
-   If it was a political event — what was the precise mechanism of power that made it possible?
-   Explain the technical or structural reality without jargon. One good analogy beats three sentences of explanation.
+End with the one detail that reframes the story — an irony, a forgotten fact,
+a consequence nobody saw coming. No summary. No "and that is why." Just the detail.
 
-4. THE MOMENT ITSELF
-   Slow down here. Use present tense. Walk through what happened step by step.
-   Exact sequence, exact times if known, exact words said.
-   At least two details that most people have never heard.
+TONE: Direct, confident, slightly irreverent. Not academic. Not moralizing.
+Mix short sentences (for impact) with longer ones (for context). Vary the rhythm.
+Use present tense when describing the key moment; past tense for everything else.
+Name real people. Quote them if you know what they said.
 
-5. THE FALLOUT — MULTIPLE TIME HORIZONS
-   Hours after: what was the immediate reaction?
-   Months after: what changed in the political, scientific, or cultural landscape?
-   Years or decades after: what is the measurable, documented consequence?
-   Who won? Who was destroyed? Who was forgotten?
-
-6. THE CLOSING REFRAME
-   End with the thing that makes the reader see the whole story differently.
-   An irony. A forgotten person. A number that puts everything in proportion.
-   A connection to today that nobody expected.
-   No summary. No "and that is why this event matters." Just the detail — and stop.
-
-WHAT MAKES IT FEEL REAL, NOT AI-GENERATED:
-- Use at least 8 specific numbers throughout: ages, distances, dates, costs, counts, durations.
-  Numbers are proof. "A lot of people died" is nothing. "Of the 900 men who crossed, 73 returned" is everything.
-- Name real people, including the ones history forgot.
-- If someone said something that day, quote them. Exact words beat paraphrase every time.
-- Go three levels deep on the most interesting detail. Don't stop at the surface fact.
-- Let sentences breathe differently: short for impact, longer for explanation.
-  Mix them. A paragraph of identical sentence lengths reads like a robot wrote it.
-- Present tense for the key moment. Past tense for everything around it.
-
-BAD: "The explosion had catastrophic consequences for the surrounding area."
-GOOD: "The blast shattered windows 11 kilometres away. In the nearest village, not one house kept its roof."
-
-BAD: "She defied the expectations placed on women of her era."
-GOOD: "She was 26. Three universities had turned her down. She applied to a fourth."
-
-BAD: "The discovery revolutionised our understanding of the field."
-GOOD: "Within 18 months, every textbook in Europe had to be reprinted."
-
-BANNED PHRASES — these are how you recognise AI writing:
+WHAT TO AVOID:
 "it is worth noting" / "history tells us" / "changed the course of history" /
-"left an indelible mark" / "geopolitical landscape" / "without a doubt" /
-"it is no coincidence" / "subsequently" / "in conclusion" / "to sum up" /
-"one cannot help but" / "it is undeniable" / "needless to say" /
-"serves as a reminder" / "stands as a testament."
+"left an indelible mark" / "without a doubt" / "subsequently" / "in conclusion" /
+"serves as a reminder" / "stands as a testament" / "it is no coincidence."
 
-LENGTH: 1,400–1,800 words. No headers or section titles. Paragraphs separated by blank lines.
+LENGTH: 600–800 words. No headers. Paragraphs separated by blank lines.
 LANGUAGE: Entire text in {lang_full}. Zero English except proper nouns.
-FIRST SENTENCE: Under 10 words. Must begin with a number or specific stat.
 
 Return JSON: {{ "content": "full article here — paragraphs separated by blank lines" }}
 """
@@ -645,7 +603,7 @@ Return JSON: {{ "content": "full article here — paragraphs separated by blank 
                 f"Narrative {idx}:{lang} (attempt {attempt})",
                 {"content": ""},
                 temperature=0.7,
-                max_tokens=8192,
+                max_tokens=4096,
             )
             content = res.get("content", "")
             last_content = content
@@ -667,10 +625,10 @@ Return JSON: {{ "content": "full article here — paragraphs separated by blank 
             return False, "Empty or too short"
 
         word_count = len(content.split())
-        if word_count < 1000:
-            return False, f"Too short: {word_count} words (min 1000)"
-        if word_count > 2400:
-            return False, f"Too long: {word_count} words (max 2400)"
+        if word_count < 450:
+            return False, f"Too short: {word_count} words (min 450)"
+        if word_count > 1100:
+            return False, f"Too long: {word_count} words (max 1100)"
 
         bad_markers = [
             "narrative pending", "content pending", "error generating",
@@ -682,10 +640,10 @@ Return JSON: {{ "content": "full article here — paragraphs separated by blank 
             if marker in content_lower:
                 return False, f"Contains placeholder/AI text: '{marker}'"
 
-        # Require at least 8 numbers/statistics in the narrative
+        # Require at least 4 numbers/statistics in the narrative
         numbers_found = re.findall(r'\b\d[\d.,]*\b', content)
-        if len(numbers_found) < 8:
-            return False, f"Too few numbers/stats: {len(numbers_found)} found (min 8 required)"
+        if len(numbers_found) < 4:
+            return False, f"Too few numbers/stats: {len(numbers_found)} found (min 4 required)"
 
         # Check it's actually in target language (rough heuristic)
         if lang != "en":
@@ -707,7 +665,7 @@ Return JSON: {{ "content": "full article here — paragraphs separated by blank 
             narratives = results.get(event_key, {})
 
             en_content = narratives.get("en", "")
-            if not en_content or len(en_content.split()) < 900:
+            if not en_content or len(en_content.split()) < 350:
                 logger.error(f"🚨 Event {idx}: English missing or too short — regenerating")
                 patch_tasks.append(
                     self._emergency_regenerate(
@@ -732,10 +690,15 @@ Return JSON: {{ "content": "full article here — paragraphs separated by blank 
             event_key = f"EVENT_{idx}"
             if event_key not in results:
                 results[event_key] = {}
+            # Use `or` so that an empty string ("") also triggers the fallback,
+            # not just a missing key. Empty string means generation failed entirely.
+            en_text = results[event_key].get("en") or ""
+            fallback_text = en_text if len(en_text.strip()) >= 200 else "Narrative unavailable."
             for lang in self.languages:
-                if not results[event_key].get(lang) or len(results[event_key][lang].strip()) < 600:
+                current = results[event_key].get(lang) or ""
+                if not current or len(current.strip()) < 200:
                     logger.error(f"🚨 CRITICAL: {idx}:{lang} still missing or too short")
-                    results[event_key][lang] = results[event_key].get("en", "Narrative unavailable.")
+                    results[event_key][lang] = fallback_text
 
         return results
 
@@ -746,12 +709,18 @@ Return JSON: {{ "content": "full article here — paragraphs separated by blank 
         event_key = f"EVENT_{idx}"
         if event_key not in results:
             results[event_key] = {}
-        results[event_key][lang] = content
+        # Only update if we actually got something back
+        if content and len(content.strip()) >= 200:
+            results[event_key][lang] = content
+        else:
+            logger.error(f"🚨 Emergency regenerate for {idx}:{lang} also failed — keeping previous value")
+            if not results[event_key].get(lang):
+                results[event_key][lang] = content  # keep whatever we have, even if short
 
     async def _patch_from_english(self, idx: int, target_lang: str, results: dict):
         event_key = f"EVENT_{idx}"
         en_content = results.get(event_key, {}).get("en", "")
-        if not en_content or len(en_content.split()) < 900:
+        if not en_content or len(en_content.split()) < 350:
             logger.error(f"🚨 Cannot patch {idx}:{target_lang} — English missing or too short")
             return
 
@@ -774,11 +743,11 @@ Return JSON: {{ "content": "translated narrative in {lang_full}" }}
 """
 
         res = await self._safe_groq_call(
-            prompt, f"Translation {idx}:{target_lang}", {"content": ""}, temperature=0.3, max_tokens=8192
+            prompt, f"Translation {idx}:{target_lang}", {"content": ""}, temperature=0.3, max_tokens=4096
         )
         translated = res.get("content", "")
 
-        if translated and len(translated.split()) >= 900:
+        if translated and len(translated.split()) >= 350:
             results[event_key][target_lang] = translated
             logger.info(f"✅ Patched {idx}:{target_lang} via translation")
         else:
