@@ -18,80 +18,82 @@ class AIProcessor:
         self.languages = ["en", "ro", "es", "de", "fr"]
 
         # ══════════════════════════════════════════════════════════
-        # 8 storytelling angles — all accessible, all anchor the
-        # date+place clearly in the first 2 sentences. Then unfold
-        # the story with simple, vivid language anyone can read.
+        # 8 storytelling angles — each specifies WHAT TYPE of number
+        # or stat to lead with. The first sentence is always a hook
+        # built around a specific figure, duration, or count.
+        # All angles anchor date+place within the first 2 sentences.
         # ══════════════════════════════════════════════════════════
         self.storytelling_angles = [
             {
                 "name": "SCENE_SETTING",
                 "instruction": (
-                    "Open by quickly placing the reader in the time and place. "
-                    "Mention the date and city/country naturally in the first 2 sentences. "
-                    "Then describe what life looked like that day — before everything changed. "
-                    "Example feel: 'It was a quiet spring morning in Paris on April 14, 1912. "
-                    "Across the Atlantic, a ship called the Titanic was about to make history — for all the wrong reasons.'"
+                    "Lead with an EXACT DURATION — how long something had been building, waiting, or standing "
+                    "before this moment. The first sentence must be a short punchy duration fact (e.g. '28 years. "
+                    "That is how long the wall had divided Berlin.'). Then place the reader in the exact time and "
+                    "location within the next sentence. Make the duration feel personal — not just historical."
                 ),
             },
             {
                 "name": "HUMAN_FOCUS",
                 "instruction": (
-                    "Open with a real person at the center of the story. Mention the date and place "
-                    "naturally within the first 2-3 sentences. Make the reader care about this person "
-                    "before showing what happened. Example feel: 'On July 20, 1969, a 38-year-old astronaut "
-                    "named Neil Armstrong looked out a small window at a place no human had ever stood — the surface of the Moon.'"
+                    "Lead with the person's AGE or a BIOGRAPHICAL NUMBER at the time of the event. "
+                    "First sentence: short, punchy age or personal stat (e.g. '38 years old. That was Neil Armstrong "
+                    "when he stepped onto the Moon.' or '52 years old, and Ray Kroc had never run a restaurant.'). "
+                    "Anchor date and place in the next sentence. Make the reader feel the human scale of the story."
                 ),
             },
             {
                 "name": "THE_BIG_MOMENT",
                 "instruction": (
-                    "Open by describing the exact moment the event happened — the date, the place, what was about to occur. "
-                    "Use plain words but vivid imagery. Example feel: 'On the evening of November 9, 1989, in Berlin, "
-                    "thousands of people gathered at a wall that had divided their city for 28 years. Tonight, that wall would come down.'"
+                    "Lead with the EXACT TIME OF DAY, a precise countdown, or a sequence number — the smallest "
+                    "unit of time that captures the moment (e.g. '8:15 AM.' or '12 seconds.' or 'The 3rd attempt.'). "
+                    "First sentence: the time or count, nothing else — then immediately name the date and place. "
+                    "Then zoom into what happened in that precise instant."
                 ),
             },
             {
                 "name": "WHY_IT_MATTERED",
                 "instruction": (
-                    "Open by explaining what was at stake. Mention the date and location in the first 2 sentences. "
-                    "Help the reader understand why this day was different. "
-                    "Example feel: 'On August 6, 1945, the Japanese city of Hiroshima would change forever. "
-                    "It was an ordinary Monday morning — until 8:15 AM.'"
+                    "Lead with the SCALE NUMBER — how many people were affected, how much money was at stake, "
+                    "how many countries changed course (e.g. '240,000 people.' or '$1 billion.' or '47 nations.'). "
+                    "First sentence: just the number and what it represents — under 10 words. "
+                    "Then anchor date and location. Then explain why that scale had to be understood immediately."
                 ),
             },
             {
                 "name": "THE_CONTRAST",
                 "instruction": (
-                    "Open by showing the calm before the storm — life going on normally — then reveal what happened. "
-                    "Mention the date and place clearly in the first 2 sentences. "
-                    "Example feel: 'On the morning of April 18, 1906, the people of San Francisco were still asleep. "
-                    "At 5:12 AM, the ground started shaking — and an entire city would be destroyed within hours.'"
+                    "Lead with the BEFORE/AFTER RATIO or percentage — what changed numerically from one day to the next "
+                    "(e.g. '1 hour earlier, it was a normal Tuesday.' or 'In 47 seconds, a city of 1 million lost everything.'). "
+                    "First sentence: the contrast stated as a number or time-gap — sharp and short. "
+                    "Anchor date and place in sentence two. Then show the normal life that existed right before."
                 ),
             },
             {
                 "name": "THE_NUMBERS_TELL",
                 "instruction": (
-                    "Open with a striking number that captures the scale of what happened. "
-                    "Mention the date and place in the first 2 sentences. "
-                    "Example feel: 'In just 47 seconds on July 28, 1976, in Tangshan, China, an earthquake killed "
-                    "more than 240,000 people. It happened in the middle of the night, while everyone was sleeping.'"
+                    "Lead with THE SINGLE MOST STRIKING NUMBER of the entire event — the one that makes readers stop. "
+                    "First sentence: the number alone, or with minimal context — under 10 words. "
+                    "Then anchor date and location. Use numbers throughout this narrative more than any other angle — "
+                    "each paragraph must contain at least one figure, stat, or measurement."
                 ),
             },
             {
                 "name": "THE_WORLD_CHANGED",
                 "instruction": (
-                    "Open with the date and place, then immediately show how the world was different the next day. "
-                    "Example feel: 'On December 17, 1903, on a windy beach in Kitty Hawk, North Carolina, two brothers "
-                    "did something humans had dreamed about for thousands of years: they flew. The age of flight had begun.'"
+                    "Lead with HOW MANY YEARS or CENTURIES had passed since the last time this happened — or that it "
+                    "was the FIRST TIME EVER in a number of years (e.g. '3,000 years of trying. Then it finally worked.' "
+                    "or 'For 400 years, no human had done this.'). First sentence: the time-span — short and astonishing. "
+                    "Then show what made this particular day the one that broke the record."
                 ),
             },
             {
                 "name": "THE_STORY_BEHIND",
                 "instruction": (
-                    "Open by hinting at a backstory the reader probably doesn't know. Anchor the date and place clearly "
-                    "within the first 2-3 sentences. Then unfold the surprise. "
-                    "Example feel: 'On April 15, 1955, in San Bernardino, California, a 52-year-old milkshake-machine salesman "
-                    "opened a small restaurant. He had no idea he was about to build the biggest fast-food chain in history.'"
+                    "Lead with A LESSER-KNOWN NUMBER that reveals the hidden backstory — something that reframes "
+                    "what most people think they know (e.g. '17 rejections.' or 'The patent cost $15.' or '3 days before "
+                    "anyone noticed.'). First sentence: the surprising number — under 10 words. "
+                    "Anchor date and place in sentence two. Then unfold the backstory that the number unlocks."
                 ),
             },
         ]
@@ -565,9 +567,8 @@ CANDIDATES:
 
         for attempt in range(1, max_retries + 1):
             prompt = f"""
-You are a great storyteller writing for a popular history app.
-Your readers are curious people of all ages — not historians.
-Write a narrative in **{lang_full} ({lang.upper()})** about this event.
+You are a journalist writing for a history magazine. Your readers are curious 25-year-olds
+who want to be surprised, not lectured. Write a narrative in **{lang_full} ({lang.upper()})**.
 
 EVENT: {year} — {text}
 WIKIPEDIA: {slug}
@@ -579,53 +580,55 @@ STORYTELLING ANGLE: {angle['name']}
 {angle['instruction']}
 ═══════════════════════════════════════════════════════
 
-REQUIRED STRUCTURE — write all 5 parts in flowing prose (no headers, no bullet points):
+MANDATORY 4-PARAGRAPH STRUCTURE (no headers, flowing prose):
 
-PART 1 — THE HOOK (2-3 sentences):
-Open using the {angle['name']} technique above. Make sure the date ({date_str}, {year})
-and the location ({location}) are clearly mentioned in the first 2 sentences — naturally,
-not awkwardly. The reader should instantly know WHEN and WHERE this happened.
+PARAGRAPH 1 — THE HOOK:
+Apply the {angle['name']} angle above. The VERY FIRST WORDS must be a NUMBER, STAT, or
+shocking specific fact — this is non-negotiable. First sentence: MAX 10 WORDS.
+Then anchor the date ({date_str}, {year}) and location ({location}) within 2 sentences.
+BAD: "Anne Boleyn was an important queen of England."
+GOOD: "1,000 days. That is all Anne Boleyn had beside Henry VIII."
+GOOD: "19 years old. That was how old he was when everything changed."
 
-PART 2 — WHAT HAPPENED (3-4 sentences):
-Tell the event itself. Be concrete: who was there, what did they do, what did they see.
-Use simple, vivid words. No jargon. No big abstract words.
+PARAGRAPH 2 — THE FACTS (MAX 60 words):
+What exactly happened. At least 1 specific number, duration, or quantity.
+Mix short sentences (3–7 words) with medium ones. No filler phrases.
+Include at least 1 detail that 95% of readers don't know.
+FORBIDDEN: "it is known that" / "history tells us" / "he was a man who."
 
-PART 3 — WHY IT HAPPENED (3-4 sentences):
-This is critical. Explain the CAUSES — the events, decisions, or pressures that led to this moment.
-What was the world like before this? What tensions or dreams or mistakes built up to it?
-Make the reader understand WHY this had to happen.
+PARAGRAPH 3 — THE CONTEXT (MAX 60 words):
+Why did this happen? What built up to it?
+At least 1 specific number, date, or duration showing scale or timeline.
+Use present tense for dramatic moments. Direct statements, zero hedging.
 
-PART 4 — THE AFTERMATH (3-4 sentences):
-What happened in the days, weeks, and months right after? Who was affected? How did people react?
-What did governments, families, or societies do in response? Be specific.
-
-PART 5 — THE LEGACY (2-3 sentences):
-Why does this still matter today, in our world? How did it shape what came next?
-End with something memorable — a thought that stays with the reader.
+PARAGRAPH 4 — THE TWIST (MAX 60 words):
+The unexpected consequence, the historical irony, or what happened the day/year AFTER.
+A number or stat that recontextualizes everything that came before.
+Connect to something the reader recognizes today. This is the paragraph that makes
+readers say "I didn't know that." End here — no summary, no conclusion sentence.
 
 ═══════════════════════════════════════════════════════
-WRITING RULES:
-1. LENGTH: 380-450 words total.
-2. LANGUAGE: Write the ENTIRE text in {lang_full}. Not a single phrase in another language.
-3. SIMPLICITY: Use everyday words. If a 14-year-old can't understand a sentence, rewrite it.
-   AVOID: "subsequent," "ramifications," "paradigm," "unprecedented confluence," "geopolitical landscape."
-   PREFER: "after that," "results," "way of thinking," "rare moment," "world politics."
-4. SHOW, DON'T LIST: Don't write "the causes were A, B, and C." Tell it as a story.
-5. CONCRETE DETAILS: Names, places, numbers, sensory details. NO vague abstractions.
-6. EMOTION: Make the reader FEEL something. Curiosity, awe, sadness, hope.
-7. FLOW: All 5 parts should blend seamlessly into one continuous narrative — no headings, no breaks.
-8. NO AI VOICE: Don't say "I will tell you," "let me explain," or any phrase that sounds like an AI.
-9. NO META: Don't reference "this article," "this event," or "today we learn about." Just tell the story.
+ABSOLUTE RULES:
+1. LENGTH: 180–250 words TOTAL. Every word earns its place.
+2. LANGUAGE: Entire text in {lang_full}. Zero English except proper nouns.
+3. FIRST SENTENCE: MAX 10 WORDS. MUST contain a number or stat.
+4. PARAGRAPHS: Separate with a blank line. Each max 60 words.
+5. NUMBERS: Minimum 2 specific numbers/statistics in the full narrative.
+6. TONE: Journalist, not historian. Confident. No "it is said that."
+7. NO AI VOICE: No "I will tell you," "let me explain," no meta-commentary.
+8. PRESENT TENSE: Use it for dramatic moments — not throughout, just where it hits.
+9. NO ACADEMIC WORDS: "subsequent" → "after"; "ramifications" → "consequences";
+   "unprecedented" → cut it entirely; "geopolitical" → "political."
 
-QUALITY CHECKLIST before submitting:
-- [ ] Does the FIRST sentence give a clear sense of WHEN and WHERE?
-- [ ] Is the entire text in {lang_full}?
-- [ ] Does it explain WHY this happened (causes/buildup)?
-- [ ] Does it describe the AFTERMATH (what changed right after)?
-- [ ] Could a 14-year-old read this and feel pulled in?
-- [ ] Is it 380-450 words?
+CHECKLIST before submitting:
+- [ ] First sentence contains a NUMBER and is under 10 words?
+- [ ] At least 2 numbers/stats across the narrative?
+- [ ] Each paragraph under 60 words?
+- [ ] Total 180–250 words?
+- [ ] Paragraph 4 ends with a twist, irony, or surprising fact?
+- [ ] Entire text in {lang_full}?
 
-Return JSON: {{ "content": "your narrative here as one flowing piece of prose" }}
+Return JSON: {{ "content": "your narrative here — 4 paragraphs separated by blank lines" }}
 """
 
             res = await self._safe_groq_call(
@@ -653,10 +656,10 @@ Return JSON: {{ "content": "your narrative here as one flowing piece of prose" }
             return False, "Empty or too short"
 
         word_count = len(content.split())
-        if word_count < 200:
-            return False, f"Too short: {word_count} words (min 200)"
-        if word_count > 600:
-            return False, f"Too long: {word_count} words (max 600)"
+        if word_count < 150:
+            return False, f"Too short: {word_count} words (min 150)"
+        if word_count > 350:
+            return False, f"Too long: {word_count} words (max 350)"
 
         bad_markers = [
             "narrative pending", "content pending", "error generating",
@@ -667,6 +670,11 @@ Return JSON: {{ "content": "your narrative here as one flowing piece of prose" }
         for marker in bad_markers:
             if marker in content_lower:
                 return False, f"Contains placeholder/AI text: '{marker}'"
+
+        # Require at least 2 numbers/statistics in the narrative
+        numbers_found = re.findall(r'\b\d[\d.,]*\b', content)
+        if len(numbers_found) < 2:
+            return False, f"Too few numbers/stats: {len(numbers_found)} found (min 2 required)"
 
         # Check it's actually in target language (rough heuristic)
         if lang != "en":
@@ -743,12 +751,14 @@ Return JSON: {{ "content": "your narrative here as one flowing piece of prose" }
 You are a literary translator. Translate this English historical narrative into {lang_full}.
 
 RULES:
-1. Preserve storytelling tone, structure, and emotional impact.
-2. Translate faithfully — don't add or remove information.
-3. Use natural, fluent {lang_full} — not word-for-word.
-4. Keep proper nouns in their {lang_full} forms.
-5. Entire output in {lang_full}. No English except proper nouns.
-6. Keep the simple, accessible language style.
+1. Preserve the short punchy sentence rhythm — do NOT smooth it into long flowing sentences.
+2. Keep ALL numbers and statistics exactly as they appear (digits, not spelled out).
+3. Translate faithfully — don't add or remove information.
+4. Use natural, fluent {lang_full} — not word-for-word mechanical translation.
+5. Keep proper nouns in their standard {lang_full} forms.
+6. Entire output in {lang_full}. No English except proper nouns.
+7. Preserve the 4-paragraph structure with blank lines between paragraphs.
+8. The first sentence of the translated text must remain SHORT (under 10 words).
 
 ENGLISH:
 {en_content}

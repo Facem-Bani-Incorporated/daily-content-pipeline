@@ -159,7 +159,9 @@ class WikiDateValidator:
             if pat in text_lower:
                 return True, f"strong match: '{pat}'"
 
-        # Medium: "Month day" appears AND year appears within 200 chars
+        # Medium: "Month day" appears AND year appears within 80 chars
+        # Tighter window reduces false positives where the date appears
+        # in the article for an unrelated event or section.
         date_phrases = [
             f"{month_name} {day_str}",
             f"{day_str} {month_name}",
@@ -168,8 +170,8 @@ class WikiDateValidator:
         for date_phrase in date_phrases:
             idx = text_lower.find(date_phrase)
             while idx != -1:
-                window_start = max(0, idx - 200)
-                window_end = min(len(text_lower), idx + 200)
+                window_start = max(0, idx - 80)
+                window_end = min(len(text_lower), idx + 80)
                 window = text_lower[window_start:window_end]
                 if year_str in window:
                     return True, f"proximity: '{date_phrase}' near {year_str}"

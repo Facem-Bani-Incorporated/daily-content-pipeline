@@ -526,17 +526,10 @@ async def run_pipeline_for_date(
             logger.error("❌ No events generated — aborting payload send")
             return False
 
-        # Final cross-tier dedup
-        final_seen_urls = set()
-        deduped_all = []
-        for ev in all_events:
-            url = str(ev.source_url)
-            if url in final_seen_urls:
-                logger.warning(f"🔁 FINAL dedup: dropped cross-tier dup {url}")
-                continue
-            final_seen_urls.add(url)
-            deduped_all.append(ev)
-        all_events = deduped_all
+        # Final cross-tier dedup — catches exact URL matches AND same-year
+        # fuzzy title matches (same historical moment, different Wikipedia articles).
+        # FREE events come first in all_events so PRO duplicates are dropped.
+        all_events = deduper.filter_final_cross_tier(all_events)
 
         # Sort: FREE events first (by impact_score desc), then PRO (by impact_score desc).
         # Frontend uses events[0] = highest-impact FREE = Main/Home hero.
