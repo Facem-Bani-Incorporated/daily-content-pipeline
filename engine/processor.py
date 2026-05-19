@@ -537,17 +537,6 @@ CANDIDATES:
     async def _fetch_narrative_lang(
         self, idx: int, item: dict, lang: str, date_str: str, angle: dict
     ) -> tuple:
-        """
-        Generate ONE narrative in ONE language.
-
-        Goal: ACCESSIBLE storytelling that anyone can read and enjoy.
-        Structure:
-          1. HOOK + when/where (using angle technique)
-          2. WHAT happened (the event itself, plainly told)
-          3. WHY it happened (the causes, the build-up)
-          4. AFTERMATH (immediate consequences in days/weeks)
-          5. LEGACY (why it still matters today)
-        """
         max_retries = 3
         year = item.get("year", "")
         text = item.get("text", "")
@@ -567,74 +556,96 @@ CANDIDATES:
 
         for attempt in range(1, max_retries + 1):
             prompt = f"""
-You are a journalist writing for a history magazine. Your readers are curious 25-year-olds
-who want to be surprised, not lectured. Write a narrative in **{lang_full} ({lang.upper()})**.
+You are a senior journalist writing a long-form feature for a history magazine.
+Your editor gave you 1,500 words and full freedom. The audience: curious adults
+who want to actually understand what happened — not just what, but why, how, and
+what it meant. Write the whole piece in {lang_full}.
 
 EVENT: {year} — {text}
 WIKIPEDIA: {slug}
 DATE: {date_str}, {year}
 LOCATION: {location}
 
-═══════════════════════════════════════════════════════
-STORYTELLING ANGLE: {angle['name']}
+ANGLE: {angle['name']}
 {angle['instruction']}
-═══════════════════════════════════════════════════════
 
-MANDATORY 4-PARAGRAPH STRUCTURE (no headers, flowing prose):
+THE STORY ARC:
+A great feature follows the logic of the event, not a template. But it always has:
 
-PARAGRAPH 1 — THE HOOK:
-Apply the {angle['name']} angle above. The VERY FIRST WORDS must be a NUMBER, STAT, or
-shocking specific fact — this is non-negotiable. First sentence: MAX 10 WORDS.
-Then anchor the date ({date_str}, {year}) and location ({location}) within 2 sentences.
-BAD: "Anne Boleyn was an important queen of England."
-GOOD: "1,000 days. That is all Anne Boleyn had beside Henry VIII."
-GOOD: "19 years old. That was how old he was when everything changed."
+1. AN OPENING THAT EARNS ATTENTION
+   Start with a single striking number or fact — under 10 words, drop-cap style.
+   Then immediately put the reader somewhere: a room, a field, a ship, a lab.
+   Who is there? What do they see? What do they not yet know?
 
-PARAGRAPH 2 — THE FACTS (MAX 60 words):
-What exactly happened. At least 1 specific number, duration, or quantity.
-Mix short sentences (3–7 words) with medium ones. No filler phrases.
-Include at least 1 detail that 95% of readers don't know.
-FORBIDDEN: "it is known that" / "history tells us" / "he was a man who."
+2. THE SCENE AND THE PEOPLE
+   Spend real time here. Who were the main figures — their age, background,
+   what they wanted, what they feared. The unknown people matter too.
+   What did the world look like just before this happened?
+   What were the forces, pressures, and mistakes that led to this exact day?
 
-PARAGRAPH 3 — THE CONTEXT (MAX 60 words):
-Why did this happen? What built up to it?
-At least 1 specific number, date, or duration showing scale or timeline.
-Use present tense for dramatic moments. Direct statements, zero hedging.
+3. THE SCIENCE, MECHANICS, OR LOGIC OF WHAT HAPPENED
+   This is what makes a story educational, not just dramatic.
+   If it was a battle — what was the actual tactical situation, the terrain, the numbers?
+   If it was a discovery — what is the underlying science, what did they prove, how?
+   If it was a political event — what was the precise mechanism of power that made it possible?
+   Explain the technical or structural reality without jargon. One good analogy beats three sentences of explanation.
 
-PARAGRAPH 4 — THE TWIST (MAX 60 words):
-The unexpected consequence, the historical irony, or what happened the day/year AFTER.
-A number or stat that recontextualizes everything that came before.
-Connect to something the reader recognizes today. This is the paragraph that makes
-readers say "I didn't know that." End here — no summary, no conclusion sentence.
+4. THE MOMENT ITSELF
+   Slow down here. Use present tense. Walk through what happened step by step.
+   Exact sequence, exact times if known, exact words said.
+   At least two details that most people have never heard.
 
-═══════════════════════════════════════════════════════
-ABSOLUTE RULES:
-1. LENGTH: 180–250 words TOTAL. Every word earns its place.
-2. LANGUAGE: Entire text in {lang_full}. Zero English except proper nouns.
-3. FIRST SENTENCE: MAX 10 WORDS. MUST contain a number or stat.
-4. PARAGRAPHS: Separate with a blank line. Each max 60 words.
-5. NUMBERS: Minimum 2 specific numbers/statistics in the full narrative.
-6. TONE: Journalist, not historian. Confident. No "it is said that."
-7. NO AI VOICE: No "I will tell you," "let me explain," no meta-commentary.
-8. PRESENT TENSE: Use it for dramatic moments — not throughout, just where it hits.
-9. NO ACADEMIC WORDS: "subsequent" → "after"; "ramifications" → "consequences";
-   "unprecedented" → cut it entirely; "geopolitical" → "political."
+5. THE FALLOUT — MULTIPLE TIME HORIZONS
+   Hours after: what was the immediate reaction?
+   Months after: what changed in the political, scientific, or cultural landscape?
+   Years or decades after: what is the measurable, documented consequence?
+   Who won? Who was destroyed? Who was forgotten?
 
-CHECKLIST before submitting:
-- [ ] First sentence contains a NUMBER and is under 10 words?
-- [ ] At least 2 numbers/stats across the narrative?
-- [ ] Each paragraph under 60 words?
-- [ ] Total 180–250 words?
-- [ ] Paragraph 4 ends with a twist, irony, or surprising fact?
-- [ ] Entire text in {lang_full}?
+6. THE CLOSING REFRAME
+   End with the thing that makes the reader see the whole story differently.
+   An irony. A forgotten person. A number that puts everything in proportion.
+   A connection to today that nobody expected.
+   No summary. No "and that is why this event matters." Just the detail — and stop.
 
-Return JSON: {{ "content": "your narrative here — 4 paragraphs separated by blank lines" }}
+WHAT MAKES IT FEEL REAL, NOT AI-GENERATED:
+- Use at least 8 specific numbers throughout: ages, distances, dates, costs, counts, durations.
+  Numbers are proof. "A lot of people died" is nothing. "Of the 900 men who crossed, 73 returned" is everything.
+- Name real people, including the ones history forgot.
+- If someone said something that day, quote them. Exact words beat paraphrase every time.
+- Go three levels deep on the most interesting detail. Don't stop at the surface fact.
+- Let sentences breathe differently: short for impact, longer for explanation.
+  Mix them. A paragraph of identical sentence lengths reads like a robot wrote it.
+- Present tense for the key moment. Past tense for everything around it.
+
+BAD: "The explosion had catastrophic consequences for the surrounding area."
+GOOD: "The blast shattered windows 11 kilometres away. In the nearest village, not one house kept its roof."
+
+BAD: "She defied the expectations placed on women of her era."
+GOOD: "She was 26. Three universities had turned her down. She applied to a fourth."
+
+BAD: "The discovery revolutionised our understanding of the field."
+GOOD: "Within 18 months, every textbook in Europe had to be reprinted."
+
+BANNED PHRASES — these are how you recognise AI writing:
+"it is worth noting" / "history tells us" / "changed the course of history" /
+"left an indelible mark" / "geopolitical landscape" / "without a doubt" /
+"it is no coincidence" / "subsequently" / "in conclusion" / "to sum up" /
+"one cannot help but" / "it is undeniable" / "needless to say" /
+"serves as a reminder" / "stands as a testament."
+
+LENGTH: 1,400–1,800 words. No headers or section titles. Paragraphs separated by blank lines.
+LANGUAGE: Entire text in {lang_full}. Zero English except proper nouns.
+FIRST SENTENCE: Under 10 words. Must begin with a number or specific stat.
+
+Return JSON: {{ "content": "full article here — paragraphs separated by blank lines" }}
 """
 
             res = await self._safe_groq_call(
                 prompt,
                 f"Narrative {idx}:{lang} (attempt {attempt})",
                 {"content": ""},
+                temperature=0.7,
+                max_tokens=8192,
             )
             content = res.get("content", "")
             last_content = content
@@ -656,10 +667,10 @@ Return JSON: {{ "content": "your narrative here — 4 paragraphs separated by bl
             return False, "Empty or too short"
 
         word_count = len(content.split())
-        if word_count < 150:
-            return False, f"Too short: {word_count} words (min 150)"
-        if word_count > 350:
-            return False, f"Too long: {word_count} words (max 350)"
+        if word_count < 1000:
+            return False, f"Too short: {word_count} words (min 1000)"
+        if word_count > 2400:
+            return False, f"Too long: {word_count} words (max 2400)"
 
         bad_markers = [
             "narrative pending", "content pending", "error generating",
@@ -671,10 +682,10 @@ Return JSON: {{ "content": "your narrative here — 4 paragraphs separated by bl
             if marker in content_lower:
                 return False, f"Contains placeholder/AI text: '{marker}'"
 
-        # Require at least 2 numbers/statistics in the narrative
+        # Require at least 8 numbers/statistics in the narrative
         numbers_found = re.findall(r'\b\d[\d.,]*\b', content)
-        if len(numbers_found) < 2:
-            return False, f"Too few numbers/stats: {len(numbers_found)} found (min 2 required)"
+        if len(numbers_found) < 8:
+            return False, f"Too few numbers/stats: {len(numbers_found)} found (min 8 required)"
 
         # Check it's actually in target language (rough heuristic)
         if lang != "en":
@@ -696,8 +707,8 @@ Return JSON: {{ "content": "your narrative here — 4 paragraphs separated by bl
             narratives = results.get(event_key, {})
 
             en_content = narratives.get("en", "")
-            if not en_content or len(en_content.split()) < 100:
-                logger.error(f"🚨 Event {idx}: English missing — regenerating")
+            if not en_content or len(en_content.split()) < 900:
+                logger.error(f"🚨 Event {idx}: English missing or too short — regenerating")
                 patch_tasks.append(
                     self._emergency_regenerate(
                         idx, item, "en", date_str, angle_assignments[idx], results
@@ -722,8 +733,8 @@ Return JSON: {{ "content": "your narrative here — 4 paragraphs separated by bl
             if event_key not in results:
                 results[event_key] = {}
             for lang in self.languages:
-                if not results[event_key].get(lang) or len(results[event_key][lang].strip()) < 50:
-                    logger.error(f"🚨 CRITICAL: {idx}:{lang} still missing")
+                if not results[event_key].get(lang) or len(results[event_key][lang].strip()) < 600:
+                    logger.error(f"🚨 CRITICAL: {idx}:{lang} still missing or too short")
                     results[event_key][lang] = results[event_key].get("en", "Narrative unavailable.")
 
         return results
@@ -740,25 +751,21 @@ Return JSON: {{ "content": "your narrative here — 4 paragraphs separated by bl
     async def _patch_from_english(self, idx: int, target_lang: str, results: dict):
         event_key = f"EVENT_{idx}"
         en_content = results.get(event_key, {}).get("en", "")
-        if not en_content or len(en_content.split()) < 100:
-            logger.error(f"🚨 Cannot patch {idx}:{target_lang} — English broken too")
+        if not en_content or len(en_content.split()) < 900:
+            logger.error(f"🚨 Cannot patch {idx}:{target_lang} — English missing or too short")
             return
 
         lang_names = {"ro": "Romanian", "es": "Spanish", "de": "German", "fr": "French"}
         lang_full = lang_names.get(target_lang, target_lang.upper())
 
         prompt = f"""
-You are a literary translator. Translate this English historical narrative into {lang_full}.
+Translate this historical narrative into {lang_full}.
 
-RULES:
-1. Preserve the short punchy sentence rhythm — do NOT smooth it into long flowing sentences.
-2. Keep ALL numbers and statistics exactly as they appear (digits, not spelled out).
-3. Translate faithfully — don't add or remove information.
-4. Use natural, fluent {lang_full} — not word-for-word mechanical translation.
-5. Keep proper nouns in their standard {lang_full} forms.
-6. Entire output in {lang_full}. No English except proper nouns.
-7. Preserve the 4-paragraph structure with blank lines between paragraphs.
-8. The first sentence of the translated text must remain SHORT (under 10 words).
+Keep the voice — the short punchy sentences, the rhythm, the journalist tone.
+Do not smooth it into academic prose. If the English has a fragment for impact, keep the fragment.
+All numbers stay as digits. Proper nouns use their standard {lang_full} form.
+Blank lines between paragraphs. First sentence stays under 10 words.
+Output only in {lang_full} — no English except proper nouns.
 
 ENGLISH:
 {en_content}
@@ -767,11 +774,11 @@ Return JSON: {{ "content": "translated narrative in {lang_full}" }}
 """
 
         res = await self._safe_groq_call(
-            prompt, f"Translation {idx}:{target_lang}", {"content": ""}
+            prompt, f"Translation {idx}:{target_lang}", {"content": ""}, temperature=0.3, max_tokens=8192
         )
         translated = res.get("content", "")
 
-        if translated and len(translated.split()) >= 100:
+        if translated and len(translated.split()) >= 900:
             results[event_key][target_lang] = translated
             logger.info(f"✅ Patched {idx}:{target_lang} via translation")
         else:
@@ -846,7 +853,14 @@ Return JSON with language codes as keys:
     # ══════════════════════════════════════════════════════════════
     # SAFE GROQ CALL
     # ══════════════════════════════════════════════════════════════
-    async def _safe_groq_call(self, prompt: str, context: str, fallback: dict) -> dict:
+    async def _safe_groq_call(
+        self,
+        prompt: str,
+        context: str,
+        fallback: dict,
+        temperature: float = 0.4,
+        max_tokens: int = 4096,
+    ) -> dict:
         try:
             completion = self.client.chat.completions.create(
                 model=self.model,
@@ -858,8 +872,8 @@ Return JSON with language codes as keys:
                     {"role": "user", "content": prompt},
                 ],
                 response_format={"type": "json_object"},
-                temperature=0.4,
-                max_completion_tokens=4096,
+                temperature=temperature,
+                max_completion_tokens=max_tokens,
             )
             raw = completion.choices[0].message.content
             return json.loads(raw)

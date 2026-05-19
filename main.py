@@ -28,6 +28,71 @@ TARGET_PRO_COUNT = 4  # 1 personalities + 1 media + 1 sport + 1 extra (best-of-t
 MIN_FREE_COUNT = 6
 MIN_PRO_COUNT = 4
 
+# Minimum final_score (0-100) for a NEW event to be accepted in refresh mode.
+# New events below this threshold are considered low-relevance and are replaced
+# by the best existing events from the DB.
+REFRESH_SCORE_THRESHOLD = 60
+
+
+def _db_row_to_event_detail(row: dict) -> EventDetail:
+    """
+    Convert a raw DB row dict (from load_top_events_for_date) into an EventDetail.
+    Used in refresh mode to fill slots with existing high-quality events.
+    No narrative generation or image uploading — uses stored data as-is.
+    """
+    def _safe_dict(val, default=None):
+        if isinstance(val, dict):
+            return val
+        return default or {}
+
+    def _safe_list(val):
+        if isinstance(val, list):
+            return val
+        return []
+
+    lang_defaults = {"en": "", "ro": "", "es": "", "de": "", "fr": ""}
+
+    title_data = {**lang_defaults, **_safe_dict(row.get("title_translations"))}
+    narrative_data = {**lang_defaults, **_safe_dict(row.get("narrative_translations"))}
+
+    try:
+        category_enum = EventCategory(str(row.get("category") or "").lower())
+    except ValueError:
+        category_enum = EventCategory.CULTURE_ARTS
+
+    event_date = row.get("event_date")
+    try:
+        year = int(event_date.year) if hasattr(event_date, "year") else 0
+    except Exception:
+        year = 0
+
+    return EventDetail(
+        category=category_enum,
+        year=year,
+        event_date=event_date,
+        source_url=str(row.get("source_url") or ""),
+        title_translations=Translations(
+            en=str(title_data.get("en") or ""),
+            ro=str(title_data.get("ro") or ""),
+            es=str(title_data.get("es") or ""),
+            de=str(title_data.get("de") or ""),
+            fr=str(title_data.get("fr") or ""),
+        ),
+        narrative_translations=Translations(
+            en=str(narrative_data.get("en") or ""),
+            ro=str(narrative_data.get("ro") or ""),
+            es=str(narrative_data.get("es") or ""),
+            de=str(narrative_data.get("de") or ""),
+            fr=str(narrative_data.get("fr") or ""),
+        ),
+        impact_score=float(row.get("impact_score") or 0),
+        page_views_30d=int(row.get("page_views_30d") or 0),
+        gallery=_safe_list(row.get("gallery")),
+        quiz=None,  # quiz preserved in DB; not re-sent to avoid overwrite
+        is_pro=bool(row.get("is_pro", False)),
+        location=row.get("location"),
+    )
+
 
 def _dedupe_by_slug(events: list, label: str = "") -> list:
     """Remove same-slug duplicates within a single list. Keeps first occurrence."""
@@ -182,8 +247,10 @@ async def run_free_pipeline(
     quiz_gen: QuizGenerator,
     deduper: EventDeduplicator,
     date_validator: WikiDateValidator,
+    is_refresh: bool = False,
 ) -> tuple:
-    logger.info(f"🆓 FREE — Discovering events for {today.strftime('%B %d')}...")
+    mode = "REFRESH" if is_refresh else "INITIAL"
+    logger.info(f"🆓 FREE [{mode}] — Discovering events for {today.strftime('%B %d')}...")
     all_events = await processor.discover_events(today)
     all_events = _dedupe_by_slug(all_events, "FREE-discover")
     logger.info(f"📋 FREE got {len(all_events)} unique validated events")
@@ -192,13 +259,11 @@ async def run_free_pipeline(
         logger.error("❌ FREE: AI returned no events")
         return [], {"free_discovered": 0}
 
-    # Keep original pool for potential backfill
     original_pool = list(all_events)
 
     logger.info("🗓️ FREE — Validating dates against Wikipedia...")
     validated = await date_validator.validate_events(all_events, today, tier="FREE")
 
-    # Backfill if validator was too strict
     if len(validated) < MIN_FREE_COUNT:
         validated = _backfill_to_minimum(
             validated, original_pool, MIN_FREE_COUNT, label="FREE"
@@ -213,7 +278,6 @@ async def run_free_pipeline(
     top_ranked = _dedupe_by_slug(top_ranked, "FREE-rank")
 
     if not top_ranked:
-        # If ranking failed, just sort by ai_score
         top_ranked = sorted(validated, key=lambda x: x.get("ai_score", 0), reverse=True)
         top_ranked = _dedupe_by_slug(top_ranked, "FREE-rank-fallback")
 
@@ -236,13 +300,7 @@ async def run_free_pipeline(
     deduped = deduper.filter_duplicates(top_ranked, tier="FREE")
     deduped = _dedupe_by_slug(deduped, "FREE-final")
 
-    if len(deduped) < TARGET_FREE_COUNT:
-        logger.warning(
-            f"⚠️ FREE: only {len(deduped)} non-dup events available "
-            f"(wanted {TARGET_FREE_COUNT})"
-        )
-
-    if not deduped:
+    if not deduped and not is_refresh:
         logger.error("❌ FREE: no non-duplicate events left")
         return [], {
             "free_discovered": len(all_events),
@@ -251,20 +309,69 @@ async def run_free_pipeline(
             "free_final": 0,
         }
 
-    top5 = deduped[:TARGET_FREE_COUNT]
+    # ── REFRESH MODE ──────────────────────────────────────────────
+    # Keep only new events that score >= threshold.
+    # Fill remaining slots with best existing DB events so total = TARGET_FREE_COUNT.
+    if is_refresh:
+        high_quality = [e for e in deduped if e.get("final_score", 0) >= REFRESH_SCORE_THRESHOLD]
+        logger.info(
+            f"🔄 FREE REFRESH: {len(high_quality)} new events score≥{REFRESH_SCORE_THRESHOLD} "
+            f"(out of {len(deduped)} new candidates)"
+        )
 
-    logger.info(f"🏆 FREE TOP {len(top5)} (post-dedup, {len(deduped)} non-dup candidates):")
-    for i, ev in enumerate(top5):
+        slots_needed = TARGET_FREE_COUNT - len(high_quality)
+        filler_details: list = []
+        if slots_needed > 0:
+            exclude_slugs = {e.get("slug", "").lower() for e in high_quality}
+            filler_rows = deduper.load_top_events_for_date(
+                today.date(), is_pro=False, limit=slots_needed, exclude_slugs=exclude_slugs
+            )
+            filler_details = [_db_row_to_event_detail(row) for row in filler_rows]
+            logger.info(f"📂 FREE REFRESH: filling {len(filler_details)} slots from DB")
+
+        new_details: list = []
+        if high_quality:
+            logger.info("✍️ FREE REFRESH — Generating narratives for new events...")
+            narratives_map = await processor.generate_secondary_narratives(high_quality, today)
+            quizzes = await quiz_gen.generate_quizzes(high_quality, narratives_map)
+            new_details = await _build_event_details(
+                high_quality, narratives_map, quizzes, today, scraper, is_pro=False
+            )
+
+        final_events_list = new_details + filler_details
+        logger.info(
+            f"🏆 FREE REFRESH TOTAL: {len(new_details)} new + "
+            f"{len(filler_details)} from DB = {len(final_events_list)}"
+        )
+        return final_events_list, {
+            "free_discovered": len(all_events),
+            "free_after_validation": len(validated),
+            "free_new_qualified": len(high_quality),
+            "free_filler_from_db": len(filler_details),
+            "free_final": len(final_events_list),
+        }
+
+    # ── INITIAL MODE ──────────────────────────────────────────────
+    selected = deduped[:TARGET_FREE_COUNT]
+
+    if len(deduped) < TARGET_FREE_COUNT:
+        logger.warning(
+            f"⚠️ FREE: only {len(deduped)} non-dup events available "
+            f"(wanted {TARGET_FREE_COUNT})"
+        )
+
+    logger.info(f"🏆 FREE TOP {len(selected)} (post-dedup, {len(deduped)} non-dup candidates):")
+    for i, ev in enumerate(selected):
         logger.info(f"  {i+1}. [{ev['year']}] {ev['text'][:80]} → {ev['final_score']}")
 
     logger.info("✍️ FREE — Generating narratives...")
-    narratives_map = await processor.generate_secondary_narratives(top5, today)
+    narratives_map = await processor.generate_secondary_narratives(selected, today)
 
     logger.info("🧠 FREE — Generating quizzes...")
-    quizzes = await quiz_gen.generate_quizzes(top5, narratives_map)
+    quizzes = await quiz_gen.generate_quizzes(selected, narratives_map)
 
     final_events_list = await _build_event_details(
-        top5, narratives_map, quizzes, today, scraper, is_pro=False
+        selected, narratives_map, quizzes, today, scraper, is_pro=False
     )
 
     return final_events_list, {
@@ -288,8 +395,10 @@ async def run_pro_pipeline(
     quiz_gen: QuizGenerator,
     deduper: EventDeduplicator,
     date_validator: WikiDateValidator,
+    is_refresh: bool = False,
 ) -> tuple:
-    logger.info(f"💎 PRO — Discovering personalities/media/sport for {today.strftime('%B %d')}...")
+    mode = "REFRESH" if is_refresh else "INITIAL"
+    logger.info(f"💎 PRO [{mode}] — Discovering personalities/media/sport for {today.strftime('%B %d')}...")
     pro_candidates = await processor.discover_pro_events(today)
     pro_candidates = _dedupe_by_slug(pro_candidates, "PRO-discover")
     logger.info(f"📋 PRO got {len(pro_candidates)} unique candidates")
@@ -322,7 +431,6 @@ async def run_pro_pipeline(
     for cat in pro_cats:
         cat_validated = by_cat_validated[cat]
         if not cat_validated and by_cat_original[cat]:
-            # Validator killed all candidates for this category — backfill
             backfill = sorted(
                 by_cat_original[cat],
                 key=lambda x: x.get("ai_score", 0),
@@ -343,7 +451,7 @@ async def run_pro_pipeline(
     pro_clean = deduper.filter_duplicates(final_pool, tier="PRO")
     pro_clean = _dedupe_by_slug(pro_clean, "PRO-clean")
 
-    if not pro_clean:
+    if not pro_clean and not is_refresh:
         logger.warning("⚠️ PRO: all candidates were duplicates")
         return [], {
             "pro_discovered": len(pro_candidates),
@@ -352,10 +460,10 @@ async def run_pro_pipeline(
         }
 
     logger.info("🔬 PRO — Selecting best event per category...")
-    pro_selected = await processor.deep_rank_pro_per_category(pro_clean, today)
+    pro_selected = await processor.deep_rank_pro_per_category(pro_clean, today) if pro_clean else []
     pro_selected = _dedupe_by_slug(pro_selected, "PRO-rank")
 
-    if not pro_selected:
+    if not pro_selected and not is_refresh:
         logger.warning("⚠️ PRO: no events selected by ranker")
         return [], {
             "pro_discovered": len(pro_candidates),
@@ -363,20 +471,65 @@ async def run_pro_pipeline(
             "pro_final": 0,
         }
 
-    logger.info("📊 PRO — Fetching pageviews...")
-    view_tasks = [scraper.fetch_page_views(item.get("slug", "")) for item in pro_selected]
-    views = await asyncio.gather(*view_tasks)
+    # Compute pageviews + final_score for all selected events
+    if pro_selected:
+        logger.info("📊 PRO — Fetching pageviews...")
+        view_tasks = [scraper.fetch_page_views(item.get("slug", "")) for item in pro_selected]
+        views = await asyncio.gather(*view_tasks)
 
-    for idx, item in enumerate(pro_selected):
-        item["views"] = views[idx] if isinstance(views[idx], int) else 0
-        item["final_score"] = ranker.calculate_final_score(
-            ai_score=item.get("deep_score", item.get("ai_score", 50)),
-            views=item["views"],
-            category=item.get("category", "personalities"),
-            year=item.get("year", 0),
+        for idx, item in enumerate(pro_selected):
+            item["views"] = views[idx] if isinstance(views[idx], int) else 0
+            item["final_score"] = ranker.calculate_final_score(
+                ai_score=item.get("deep_score", item.get("ai_score", 50)),
+                views=item["views"],
+                category=item.get("category", "personalities"),
+                year=item.get("year", 0),
+            )
+            item["is_pro"] = True
+
+    # ── REFRESH MODE ──────────────────────────────────────────────
+    # Keep only new events that score >= threshold.
+    # Fill remaining slots with best existing DB events so total = TARGET_PRO_COUNT.
+    if is_refresh:
+        high_quality = [e for e in pro_selected if e.get("final_score", 0) >= REFRESH_SCORE_THRESHOLD]
+        logger.info(
+            f"🔄 PRO REFRESH: {len(high_quality)} new events score≥{REFRESH_SCORE_THRESHOLD} "
+            f"(out of {len(pro_selected)} new candidates)"
         )
-        item["is_pro"] = True
 
+        slots_needed = TARGET_PRO_COUNT - len(high_quality)
+        filler_details: list = []
+        if slots_needed > 0:
+            exclude_slugs = {e.get("slug", "").lower() for e in high_quality}
+            filler_rows = deduper.load_top_events_for_date(
+                today.date(), is_pro=True, limit=slots_needed, exclude_slugs=exclude_slugs
+            )
+            filler_details = [_db_row_to_event_detail(row) for row in filler_rows]
+            logger.info(f"📂 PRO REFRESH: filling {len(filler_details)} slots from DB")
+
+        new_details: list = []
+        if high_quality:
+            logger.info("✍️ PRO REFRESH — Generating narratives for new events...")
+            narratives_map = await processor.generate_secondary_narratives(high_quality, today)
+            quizzes = await quiz_gen.generate_quizzes(high_quality, narratives_map)
+            new_details = await _build_event_details(
+                high_quality, narratives_map, quizzes, today, scraper, is_pro=True
+            )
+
+        final_pro_list = new_details + filler_details
+        logger.info(
+            f"🏆 PRO REFRESH TOTAL: {len(new_details)} new + "
+            f"{len(filler_details)} from DB = {len(final_pro_list)}"
+        )
+        return final_pro_list, {
+            "pro_discovered": len(pro_candidates),
+            "pro_after_validation": len(validated),
+            "pro_new_qualified": len(high_quality),
+            "pro_filler_from_db": len(filler_details),
+            "pro_final": len(final_pro_list),
+        }
+
+    # ── INITIAL MODE ──────────────────────────────────────────────
     logger.info(f"🏆 PRO SELECTED {len(pro_selected)} events:")
     for i, ev in enumerate(pro_selected):
         logger.info(
@@ -500,23 +653,31 @@ async def run_pipeline_for_date(
     quiz_gen: QuizGenerator,
     ranker: ScoringEngine,
     run_social: bool = False,
+    refresh_mode: bool = False,
 ) -> bool:
     """
     Run the full FREE + PRO pipeline for `target_date`.
+    refresh_mode=True  → date already has events; keep only new events scoring ≥60,
+                         fill remaining slots with best existing DB events.
+    refresh_mode=False → fresh date; generate full 6 FREE + 4 PRO.
     Creates fresh deduper/validator so each date gets a clean DB snapshot.
     Returns True if payload was sent successfully.
     """
     deduper = EventDeduplicator(similarity_threshold=0.85)
     date_validator = WikiDateValidator(fuzzy_slug_threshold=0.90)
 
+    mode_label = "REFRESH" if refresh_mode else f"INITIAL ({TARGET_FREE_COUNT}+{TARGET_PRO_COUNT})"
+
     try:
-        logger.info("⚡ Launching FREE + PRO pipelines in parallel...")
+        logger.info(f"⚡ Launching FREE + PRO pipelines in parallel — {mode_label}...")
         (free_events, free_meta), (pro_events, pro_meta) = await asyncio.gather(
             run_free_pipeline(
-                target_date, processor, scraper, ranker, quiz_gen, deduper, date_validator
+                target_date, processor, scraper, ranker, quiz_gen, deduper, date_validator,
+                is_refresh=refresh_mode,
             ),
             run_pro_pipeline(
-                target_date, processor, scraper, ranker, quiz_gen, deduper, date_validator
+                target_date, processor, scraper, ranker, quiz_gen, deduper, date_validator,
+                is_refresh=refresh_mode,
             ),
         )
 
@@ -614,19 +775,19 @@ async def main():
     ranker = ScoringEngine()
 
     today = datetime.now()
-    dates_to_process = [today + timedelta(days=i) for i in range(3)]
+    dates_to_process = [today + timedelta(days=i) for i in range(4)]
 
     for i, target_date in enumerate(dates_to_process):
-        label = ["TODAY", "TOMORROW", "DAY AFTER"][i]
+        label = ["TODAY", "TOMORROW", "DAY AFTER", "DAY +3"][i]
         logger.info(f"\n{'═' * 60}")
         logger.info(f"📅 Processing {label}: {target_date.date()}")
         logger.info(f"{'═' * 60}")
 
-        # Check if events already exist for this calendar day
+        # Detect mode: refresh (date already has events) vs initial (fresh date)
         checker = EventDeduplicator()
-        if checker.has_events_for_date(target_date.date()):
-            logger.info(f"⏭️  {label} ({target_date.date()}) already has events — skipping")
-            continue
+        already_populated = checker.has_events_for_date(target_date.date())
+        mode = "REFRESH" if already_populated else "INITIAL"
+        logger.info(f"📋 {label} ({target_date.date()}) → {mode} mode")
 
         await run_pipeline_for_date(
             target_date=target_date,
@@ -635,6 +796,7 @@ async def main():
             quiz_gen=quiz_gen,
             ranker=ranker,
             run_social=(i == 0),  # Social media only for today
+            refresh_mode=already_populated,
         )
 
     logger.info("\n✅ 3-day pipeline window complete.")

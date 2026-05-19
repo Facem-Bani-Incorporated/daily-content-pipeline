@@ -1,5 +1,7 @@
 import os
+import json as _json
 import psycopg2
+import psycopg2.extras
 from difflib import SequenceMatcher
 from core.logger import setup_logger
 
@@ -141,7 +143,11 @@ class EventDeduplicator:
         return False, ""
 
     def has_events_for_date(self, target_date) -> bool:
-        """Check if the DB already has events for this calendar day (month+day)."""
+        """
+        Returns True if any events already exist for this calendar day (any year).
+        Used for mode detection: True → refresh mode (add top 1+1), False → initial mode (full 6+4).
+        Never causes a skip — the pipeline always runs.
+        """
         try:
             conn = self._get_connection()
             cur = conn.cursor()
@@ -157,12 +163,72 @@ class EventDeduplicator:
             cur.close()
             conn.close()
             logger.info(
-                f"📅 Date check {target_date}: {count} events found in DB"
+                f"📅 Date check {target_date}: {count} existing events in DB"
             )
             return count > 0
         except Exception as e:
-            logger.warning(f"⚠️ Could not check events for {target_date}: {e} — will process anyway")
+            logger.warning(f"⚠️ Could not check events for {target_date}: {e} — assuming initial mode")
             return False
+
+    def load_top_events_for_date(
+        self, target_date, is_pro: bool, limit: int, exclude_slugs: set = None
+    ) -> list:
+        """
+        Load the top existing events from DB for this calendar day (any year).
+        Returns list of row dicts with all fields needed to rebuild EventDetail.
+        Used in refresh mode to fill slots when not enough new events score >= 60.
+        """
+        if limit <= 0:
+            return []
+        exclude_slugs = {s.lower() for s in (exclude_slugs or set())}
+        try:
+            conn = self._get_connection()
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            # Fetch extra rows to account for exclusions
+            fetch_limit = limit + len(exclude_slugs) + 10
+            cur.execute(
+                """
+                SELECT source_url, event_date, category, impact_score, page_views_30d,
+                       title_translations, narrative_translations, is_pro, location, gallery
+                FROM events
+                WHERE EXTRACT(MONTH FROM event_date) = %s
+                  AND EXTRACT(DAY FROM event_date) = %s
+                  AND is_pro = %s
+                ORDER BY impact_score DESC
+                LIMIT %s
+                """,
+                (target_date.month, target_date.day, is_pro, fetch_limit),
+            )
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+
+            result = []
+            for row in rows:
+                slug = str(row.get("source_url") or "").split("/wiki/")[-1].lower()
+                if slug in exclude_slugs:
+                    continue
+                # psycopg2 may return JSONB as dict already, or as a string — handle both
+                row_dict = dict(row)
+                for field in ("title_translations", "narrative_translations", "gallery"):
+                    val = row_dict.get(field)
+                    if isinstance(val, str):
+                        try:
+                            row_dict[field] = _json.loads(val)
+                        except Exception:
+                            row_dict[field] = {} if field != "gallery" else []
+                result.append(row_dict)
+                if len(result) >= limit:
+                    break
+
+            logger.info(
+                f"📂 Loaded {len(result)} existing {'PRO' if is_pro else 'FREE'} "
+                f"events from DB for {target_date} (filler)"
+            )
+            return result
+        except Exception as e:
+            logger.warning(f"⚠️ Could not load existing events for {target_date}: {e}")
+            return []
 
     def filter_duplicates(self, events: list, tier: str = "FREE") -> list:
         if not events:
