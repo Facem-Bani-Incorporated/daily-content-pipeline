@@ -870,9 +870,9 @@ Return JSON with language codes as keys:
     def _recover_from_json_validate_failed(self, exc: Exception, context: str) -> dict | None:
         """
         When Groq raises json_validate_failed (400), the error body contains
-        the raw attempted generation under 'failed_generation'. The content is
-        usually correct prose — just with unescaped newlines inside the JSON string.
-        Extract it, fix the encoding, and return the parsed dict.
+        the raw attempted generation under 'failed_generation'. Two known failure modes:
+          1. Literal newlines inside a JSON string value  → fix with char-by-char escaper
+          2. Content value written without quotes at all  → extract with regex
         """
         try:
             body = getattr(exc, "body", None)
@@ -882,7 +882,7 @@ Return JSON with language codes as keys:
             if not failed_gen:
                 return None
 
-            # First: try direct parse (sometimes it works as-is)
+            # Strategy 1: direct parse (works occasionally)
             try:
                 result = json.loads(failed_gen)
                 logger.info(f"✅ ({context}) recovered JSON from failed_generation directly")
@@ -890,15 +890,52 @@ Return JSON with language codes as keys:
             except json.JSONDecodeError:
                 pass
 
-            # Second: fix unescaped newlines inside string values, then re-parse
-            fixed = self._escape_newlines_in_json_strings(failed_gen)
-            result = json.loads(fixed)
-            logger.info(f"✅ ({context}) recovered JSON after escaping newlines in strings")
-            return result
+            # Strategy 2: fix unescaped newlines inside quoted string values
+            try:
+                fixed = self._escape_newlines_in_json_strings(failed_gen)
+                result = json.loads(fixed)
+                logger.info(f"✅ ({context}) recovered JSON after escaping newlines in strings")
+                return result
+            except json.JSONDecodeError:
+                pass
+
+            # Strategy 3: content value is completely unquoted
+            # e.g. { "content": \n  Some text...\n" }
+            extracted = self._extract_unquoted_content_field(failed_gen)
+            if extracted:
+                logger.info(f"✅ ({context}) recovered JSON by extracting unquoted content field")
+                return extracted
 
         except Exception as recover_err:
             logger.debug(f"⚠️ JSON recovery failed for ({context}): {recover_err}")
+        return None
+
+    @staticmethod
+    def _extract_unquoted_content_field(raw: str) -> dict | None:
+        """
+        Handle: { "content": \n  Actual text here... \n" }
+        The model wrote the value without an opening quote.
+        Find everything after `"content":` and strip trailing JSON cruft.
+        """
+        m = re.search(r'"content"\s*:\s*\n?\s*', raw)
+        if not m:
             return None
+
+        content = raw[m.end():]
+
+        # Strip leading quote if partially quoted
+        if content.startswith('"'):
+            content = content[1:]
+
+        # Strip trailing closing braces, stray quotes, whitespace
+        content = content.rstrip()
+        while content and content[-1] in ('}', '"', '\n', '\r', ' '):
+            content = content[:-1].rstrip()
+
+        content = content.strip()
+        if len(content) > 50:
+            return {"content": content}
+        return None
 
     @staticmethod
     def _escape_newlines_in_json_strings(raw: str) -> str:

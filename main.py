@@ -789,26 +789,55 @@ async def run_pipeline_for_date(
 
 
 # ══════════════════════════════════════════════════════════════════
-# MAIN — process today + next 2 days, skip dates that already exist
+# MAIN
+# Auto-detects which days need processing:
+#   - If today AND tomorrow already have events → only process day+2
+#   - Otherwise → process all 3 days (each in REFRESH or INITIAL as needed)
+# DAY_OFFSET env var overrides auto-detection (0/1/2 = specific day only).
 # ══════════════════════════════════════════════════════════════════
 async def main():
-    logger.info("🚀 Starting DailyHistory Pipeline (FREE + PRO) — 3-day window...")
+    import os
+
+    today = datetime.now()
+    day_labels = {0: "TODAY", 1: "TOMORROW", 2: "DAY AFTER"}
+
+    day_offset_env = os.environ.get("DAY_OFFSET")
+    if day_offset_env is not None:
+        # Manual override via env var
+        try:
+            offset = int(day_offset_env)
+            dates_to_process = [(offset, today + timedelta(days=offset))]
+            logger.info(f"🚀 Pipeline — manual override DAY_OFFSET={offset}")
+        except ValueError:
+            logger.warning(f"⚠️ Invalid DAY_OFFSET='{day_offset_env}' — using auto-detect")
+            day_offset_env = None
+
+    if day_offset_env is None:
+        # Auto-detect: check if today and tomorrow are already populated
+        checker = EventDeduplicator()
+        today_populated = checker.has_events_for_date(today.date())
+        tomorrow_populated = checker.has_events_for_date((today + timedelta(days=1)).date())
+
+        if today_populated and tomorrow_populated:
+            logger.info(
+                "🚀 Pipeline — today and tomorrow already have events → processing day+2 only"
+            )
+            dates_to_process = [(2, today + timedelta(days=2))]
+        else:
+            logger.info("🚀 Pipeline — running full 3-day window")
+            dates_to_process = [(i, today + timedelta(days=i)) for i in range(3)]
 
     scraper = WikiScraper()
     processor = AIProcessor()
     quiz_gen = QuizGenerator()
     ranker = ScoringEngine()
 
-    today = datetime.now()
-    dates_to_process = [today + timedelta(days=i) for i in range(4)]
-
-    for i, target_date in enumerate(dates_to_process):
-        label = ["TODAY", "TOMORROW", "DAY AFTER", "DAY +3"][i]
+    for i, target_date in dates_to_process:
+        label = day_labels.get(i, f"DAY +{i}")
         logger.info(f"\n{'═' * 60}")
         logger.info(f"📅 Processing {label}: {target_date.date()}")
         logger.info(f"{'═' * 60}")
 
-        # Detect mode: refresh (date already has events) vs initial (fresh date)
         checker = EventDeduplicator()
         already_populated = checker.has_events_for_date(target_date.date())
         mode = "REFRESH" if already_populated else "INITIAL"
@@ -820,11 +849,11 @@ async def main():
             processor=processor,
             quiz_gen=quiz_gen,
             ranker=ranker,
-            run_social=(i == 0),  # Social media only for today
+            run_social=(i == 0),
             refresh_mode=already_populated,
         )
 
-    logger.info("\n✅ 3-day pipeline window complete.")
+    logger.info("\n✅ Pipeline complete.")
 
 
 if __name__ == "__main__":
