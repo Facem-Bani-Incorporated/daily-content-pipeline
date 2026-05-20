@@ -592,7 +592,8 @@ WHAT TO AVOID:
 "left an indelible mark" / "without a doubt" / "subsequently" / "in conclusion" /
 "serves as a reminder" / "stands as a testament" / "it is no coincidence."
 
-LENGTH: 600–800 words. No headers. Paragraphs separated by blank lines.
+LENGTH: 500–800 words. Aim for 600. If the event genuinely has less to say, 300 words
+of tight, accurate prose beats 700 words of filler. No headers. Paragraphs separated by blank lines.
 LANGUAGE: Entire text in {lang_full}. Zero English except proper nouns.
 
 Return JSON: {{ "content": "full article here — paragraphs separated by blank lines" }}
@@ -625,11 +626,17 @@ Return JSON: {{ "content": "full article here — paragraphs separated by blank 
             return False, "Empty or too short"
 
         word_count = len(content.split())
-        if word_count < 450:
-            return False, f"Too short: {word_count} words (min 450)"
-        if word_count > 1100:
-            return False, f"Too long: {word_count} words (max 1100)"
 
+        # Hard floor: anything under 200 words is a broken/truncated response → retry
+        if word_count < 200:
+            return False, f"Too short: {word_count} words (hard min 200)"
+
+        # Soft floor: 300–500 is acceptable, just logged as a warning (no retry)
+        # Hard ceiling: above 1200 is unlikely to be tight prose → retry
+        if word_count > 1200:
+            return False, f"Too long: {word_count} words (max 1200)"
+
+        # Broken/placeholder content → always retry
         bad_markers = [
             "narrative pending", "content pending", "error generating",
             "i apologize", "i'm sorry", "as an ai", "i cannot",
@@ -640,11 +647,6 @@ Return JSON: {{ "content": "full article here — paragraphs separated by blank 
             if marker in content_lower:
                 return False, f"Contains placeholder/AI text: '{marker}'"
 
-        # Require at least 4 numbers/statistics in the narrative
-        numbers_found = re.findall(r'\b\d[\d.,]*\b', content)
-        if len(numbers_found) < 4:
-            return False, f"Too few numbers/stats: {len(numbers_found)} found (min 4 required)"
-
         # Check it's actually in target language (rough heuristic)
         if lang != "en":
             english_giveaways = ["the ", "and ", "was ", "were ", "this ", "that ", "with ", "from "]
@@ -652,6 +654,11 @@ Return JSON: {{ "content": "full article here — paragraphs separated by blank 
             ratio = count / len(english_giveaways)
             if ratio > 0.8:
                 return False, f"Appears to be English instead of {lang}"
+
+        # Numbers check: warn but don't retry — a short factual piece may naturally have fewer
+        numbers_found = re.findall(r'\b\d[\d.,]*\b', content)
+        if len(numbers_found) < 3:
+            logger.warning(f"⚠️ Narrative [{lang}]: only {len(numbers_found)} numbers found (prefer ≥3)")
 
         return True, "OK"
 
@@ -665,7 +672,7 @@ Return JSON: {{ "content": "full article here — paragraphs separated by blank 
             narratives = results.get(event_key, {})
 
             en_content = narratives.get("en", "")
-            if not en_content or len(en_content.split()) < 350:
+            if not en_content or len(en_content.split()) < 200:
                 logger.error(f"🚨 Event {idx}: English missing or too short — regenerating")
                 patch_tasks.append(
                     self._emergency_regenerate(
@@ -720,7 +727,7 @@ Return JSON: {{ "content": "full article here — paragraphs separated by blank 
     async def _patch_from_english(self, idx: int, target_lang: str, results: dict):
         event_key = f"EVENT_{idx}"
         en_content = results.get(event_key, {}).get("en", "")
-        if not en_content or len(en_content.split()) < 350:
+        if not en_content or len(en_content.split()) < 200:
             logger.error(f"🚨 Cannot patch {idx}:{target_lang} — English missing or too short")
             return
 
@@ -747,7 +754,7 @@ Return JSON: {{ "content": "translated narrative in {lang_full}" }}
         )
         translated = res.get("content", "")
 
-        if translated and len(translated.split()) >= 350:
+        if translated and len(translated.split()) >= 200:
             results[event_key][target_lang] = translated
             logger.info(f"✅ Patched {idx}:{target_lang} via translation")
         else:
@@ -850,5 +857,75 @@ Return JSON with language codes as keys:
             logger.error(f"🚨 JSON Parse Error ({context}): {e}")
             return fallback
         except Exception as e:
+            # Groq returns 400 json_validate_failed when the model generates
+            # literal newlines inside a JSON string value.
+            # The content is correct — just the JSON encoding is broken.
+            # Try to recover from the failed_generation field in the error body.
+            recovered = self._recover_from_json_validate_failed(e, context)
+            if recovered is not None:
+                return recovered
             logger.error(f"🚨 AI Error ({context}): {e}")
             return fallback
+
+    def _recover_from_json_validate_failed(self, exc: Exception, context: str) -> dict | None:
+        """
+        When Groq raises json_validate_failed (400), the error body contains
+        the raw attempted generation under 'failed_generation'. The content is
+        usually correct prose — just with unescaped newlines inside the JSON string.
+        Extract it, fix the encoding, and return the parsed dict.
+        """
+        try:
+            body = getattr(exc, "body", None)
+            if not isinstance(body, dict):
+                return None
+            failed_gen = body.get("error", {}).get("failed_generation", "")
+            if not failed_gen:
+                return None
+
+            # First: try direct parse (sometimes it works as-is)
+            try:
+                result = json.loads(failed_gen)
+                logger.info(f"✅ ({context}) recovered JSON from failed_generation directly")
+                return result
+            except json.JSONDecodeError:
+                pass
+
+            # Second: fix unescaped newlines inside string values, then re-parse
+            fixed = self._escape_newlines_in_json_strings(failed_gen)
+            result = json.loads(fixed)
+            logger.info(f"✅ ({context}) recovered JSON after escaping newlines in strings")
+            return result
+
+        except Exception as recover_err:
+            logger.debug(f"⚠️ JSON recovery failed for ({context}): {recover_err}")
+            return None
+
+    @staticmethod
+    def _escape_newlines_in_json_strings(raw: str) -> str:
+        """
+        Walk the raw JSON character by character.
+        Inside a JSON string value, replace literal \\n / \\r with \\\\n / \\\\r.
+        Leaves structural whitespace (outside strings) untouched.
+        """
+        result = []
+        in_string = False
+        escape_next = False
+
+        for ch in raw:
+            if escape_next:
+                result.append(ch)
+                escape_next = False
+            elif ch == "\\":
+                result.append(ch)
+                escape_next = True
+            elif ch == '"':
+                in_string = not in_string
+                result.append(ch)
+            elif in_string and ch == "\n":
+                result.append("\\n")
+            elif in_string and ch == "\r":
+                result.append("\\r")
+            else:
+                result.append(ch)
+
+        return "".join(result)

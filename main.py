@@ -94,6 +94,30 @@ def _db_row_to_event_detail(row: dict) -> EventDetail:
     )
 
 
+def _serialize_quiz(quiz) -> dict | None:
+    """
+    Serialize QuizTranslations into the JSON structure expected by the Java backend.
+    Uses camelCase keys (correctId) to match the Java DTO.
+    Returns None if quiz is missing — backend treats null as "no quiz yet".
+    """
+    if quiz is None:
+        return None
+    result = {}
+    for lang in ["en", "ro", "es", "de", "fr"]:
+        questions = getattr(quiz, lang, [])
+        result[lang] = [
+            {
+                "id": q.id,
+                "question": q.question,
+                "options": [{"id": opt.id, "text": opt.text} for opt in q.options],
+                "correctId": q.correct_id,
+                "explanation": q.explanation,
+            }
+            for q in questions
+        ]
+    return result
+
+
 def _dedupe_by_slug(events: list, label: str = "") -> list:
     """Remove same-slug duplicates within a single list. Keeps first occurrence."""
     seen_slugs = set()
@@ -132,6 +156,7 @@ async def send_to_java(payload: DailyPayload):
             "gallery": ev.gallery if ev.gallery else [],
             "isPro": bool(ev.is_pro),
             "location": ev.location,
+            "quiz": _serialize_quiz(ev.quiz),
         }
         events_final.append(ev_dict)
 
