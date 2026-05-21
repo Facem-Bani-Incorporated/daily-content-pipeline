@@ -124,16 +124,23 @@ STRICT JSON — return ONLY this:
     # ══════════════════════════════════════════════════════════════════════
 
     def _validate_and_build(self, raw: dict, idx: int) -> QuizTranslations | None:
-        """Validate raw AI output and build QuizTranslations model."""
+        """Validate raw AI output and build QuizTranslations model.
+
+        Lenient by design: keep every language that yields 4 valid questions and
+        skip the ones that don't (e.g. a truncated response) instead of throwing
+        away the whole quiz. English is required as the base — the backend serves
+        it as a fallback for any language that is missing.
+        """
         validated = {}
 
         for lang in LANGUAGES:
             questions_raw = raw.get(lang, [])
             if not isinstance(questions_raw, list):
-                logger.warning(f"Quiz #{idx}: missing or invalid '{lang}' array")
-                return None
+                logger.warning(f"Quiz #{idx}: missing or invalid '{lang}' array — skipping language")
+                continue
 
             questions = []
+            lang_ok = True
             for qi, q in enumerate(questions_raw[:4]):
                 try:
                     q_id = q.get("id", f"q{qi + 1}")
@@ -144,11 +151,13 @@ STRICT JSON — return ONLY this:
 
                     if not question_text or not correct_id or not options_raw:
                         logger.warning(f"Quiz #{idx} {lang} q{qi+1}: missing fields")
-                        return None
+                        lang_ok = False
+                        break
 
                     if correct_id not in VALID_IDS:
                         logger.warning(f"Quiz #{idx} {lang} q{qi+1}: invalid correctId '{correct_id}'")
-                        return None
+                        lang_ok = False
+                        break
 
                     # Build options
                     options = []
@@ -165,12 +174,14 @@ STRICT JSON — return ONLY this:
 
                     if len(options) != 4:
                         logger.warning(f"Quiz #{idx} {lang} q{qi+1}: expected 4 options, got {len(options)}")
-                        return None
+                        lang_ok = False
+                        break
 
                     # Verify correct_id exists in options
                     if correct_id not in option_ids_seen:
                         logger.warning(f"Quiz #{idx} {lang} q{qi+1}: correctId '{correct_id}' not in options")
-                        return None
+                        lang_ok = False
+                        break
 
                     questions.append(QuizQuestion(
                         id=q_id if q_id in VALID_Q_IDS else f"q{qi + 1}",
@@ -181,17 +192,20 @@ STRICT JSON — return ONLY this:
                     ))
                 except Exception as e:
                     logger.warning(f"Quiz #{idx} {lang} q{qi+1} parse error: {e}")
-                    return None
+                    lang_ok = False
+                    break
 
-            if len(questions) != 4:
-                logger.warning(f"Quiz #{idx}: '{lang}' has {len(questions)} questions instead of 4")
-                return None
+            if lang_ok and len(questions) == 4:
+                validated[lang] = questions
+            else:
+                logger.warning(f"Quiz #{idx}: '{lang}' incomplete ({len(questions)}/4) — skipping language")
 
-            validated[lang] = questions
-
-        if len(validated) != 5:
-            logger.warning(f"Quiz #{idx}: only {len(validated)}/5 languages valid")
+        # English is the required base; without it the backend has nothing to serve.
+        if "en" not in validated:
+            logger.warning(f"Quiz #{idx}: English missing/invalid — dropping quiz")
             return None
+
+        logger.info(f"Quiz #{idx}: built with {len(validated)}/5 languages: {sorted(validated.keys())}")
 
         try:
             return QuizTranslations(**validated)
