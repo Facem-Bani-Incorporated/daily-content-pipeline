@@ -94,6 +94,67 @@ class AIProcessor:
             },
         ]
 
+        # ══════════════════════════════════════════════════════════
+        # 6 narrative VOICES — a second axis of variation, orthogonal
+        # to the angle above. The angle decides the STRUCTURE of the
+        # piece; the voice decides its PERSONALITY. Each event gets a
+        # unique (angle, voice) pair, so two articles can never read
+        # the same way even on the same day.
+        # ══════════════════════════════════════════════════════════
+        self.narrative_voices = [
+            {
+                "name": "THE_RACONTEUR",
+                "instruction": (
+                    "Write like the best storyteller at the dinner table: warm, confident, "
+                    "a little mischievous. Dry humor, perfect timing, the occasional aside that "
+                    "makes the reader grin. You are not lecturing — you are letting them in on "
+                    "a great story you can't wait to tell."
+                ),
+            },
+            {
+                "name": "THE_VIVID_EYE",
+                "instruction": (
+                    "Write like a cinematographer with a pen. Sensory, concrete, immediate — "
+                    "what it looked like, sounded like, smelled like. The reader should see it, "
+                    "not be told about it. Spare, sharp images over adjectives."
+                ),
+            },
+            {
+                "name": "THE_CURIOUS_MIND",
+                "instruction": (
+                    "Write like someone who just learned this and can't believe how cool it is. "
+                    "Lead the reader through the 'wait, how did that even work?' moments. "
+                    "Explain the mechanism, the trick, the science — and make the explanation "
+                    "the most satisfying part of the piece."
+                ),
+            },
+            {
+                "name": "THE_WRY_OBSERVER",
+                "instruction": (
+                    "Write with a raised eyebrow. Find the irony, the absurd human detail, "
+                    "the gap between what people intended and what actually happened. "
+                    "Understated, never cruel, never forced — the humor comes from the truth, "
+                    "not from jokes pasted on top."
+                ),
+            },
+            {
+                "name": "THE_LITERARY_HAND",
+                "instruction": (
+                    "Write like a novelist who happens to be telling something true. "
+                    "Build a little tension, control the pace, let one image carry weight. "
+                    "Lyrical but never purple — every sentence still earns its place and stays clear."
+                ),
+            },
+            {
+                "name": "THE_PLAINSPOKEN_GUIDE",
+                "instruction": (
+                    "Write crisp, direct, confident — but with a pulse. No throat-clearing, "
+                    "no fluff, every sentence does work. Personality lives in the precision and "
+                    "the well-chosen detail, not in decoration. Think great explainer, fast and clean."
+                ),
+            },
+        ]
+
     def _get_target_date_str(self, target_date: datetime) -> str:
         return target_date.strftime("%B %d")
 
@@ -494,15 +555,18 @@ CANDIDATES:
     async def generate_secondary_narratives(self, top_events: list, target_date: datetime) -> dict:
         date_str = self._get_target_date_str(target_date)
 
-        angle_assignments = self._assign_storytelling_angles(len(top_events))
+        style_assignments = self._assign_narrative_styles(top_events)
         for idx, item in enumerate(top_events):
-            angle = angle_assignments[idx]
-            logger.info(f"📖 Event {idx} ({item.get('slug', '')[:30]}) → {angle['name']}")
+            style = style_assignments[idx]
+            logger.info(
+                f"📖 Event {idx} ({item.get('slug', '')[:30]}) → "
+                f"{style['angle']['name']} / {style['voice']['name']}"
+            )
 
         async def process_single(idx, item):
-            angle = angle_assignments[idx]
+            style = style_assignments[idx]
             lang_results = await asyncio.gather(*[
-                self._fetch_narrative_lang(idx, item, lang, date_str, angle)
+                self._fetch_narrative_lang(idx, item, lang, date_str, style)
                 for lang in self.languages
             ])
             return f"EVENT_{idx}", dict(lang_results)
@@ -512,32 +576,63 @@ CANDIDATES:
         )
 
         results = await self._verify_and_patch_narratives(
-            results, top_events, date_str, angle_assignments
+            results, top_events, date_str, style_assignments
         )
         self._audit_opening_diversity(results)
         return results
 
-    def _assign_storytelling_angles(self, count: int) -> list:
+    def _assign_narrative_styles(self, items: list) -> list:
+        """
+        Assign each event a unique (angle, voice) pair.
+
+        - The angle controls the STRUCTURE of the piece, the voice its PERSONALITY.
+        - Seed = day + the batch's slugs, so the FREE batch and the PRO batch get
+          different shuffles (no more "event 0 of both tiers gets the same angle").
+        - Angles (8) and voices (6) are walked in lockstep with a uniqueness guard,
+          so for any realistic batch size every event gets a distinct combination.
+        """
         import random
         import hashlib
 
+        count = len(items)
         day_seed = datetime.now().strftime("%Y-%m-%d")
-        seed = int(hashlib.md5(day_seed.encode()).hexdigest()[:8], 16)
+        salt = "|".join(sorted((it.get("slug") or "") for it in items))
+        seed = int(hashlib.md5(f"{day_seed}::{salt}".encode()).hexdigest()[:8], 16)
         rng = random.Random(seed)
 
-        pool = list(self.storytelling_angles)
-        rng.shuffle(pool)
+        angles = list(self.storytelling_angles)
+        voices = list(self.narrative_voices)
+        rng.shuffle(angles)
+        rng.shuffle(voices)
 
-        return [pool[i % len(pool)] for i in range(count)]
+        styles = []
+        used_pairs = set()
+        for i in range(count):
+            angle = angles[i % len(angles)]
+            voice = voices[i % len(voices)]
+            # Guarantee the (angle, voice) pair is unique within this batch.
+            guard = 0
+            max_guard = len(angles) * len(voices)
+            while (angle["name"], voice["name"]) in used_pairs and guard < max_guard:
+                guard += 1
+                voice = voices[(i + guard) % len(voices)]
+                if (angle["name"], voice["name"]) in used_pairs:
+                    angle = angles[(i + guard) % len(angles)]
+            used_pairs.add((angle["name"], voice["name"]))
+            styles.append({"angle": angle, "voice": voice})
+
+        return styles
 
     async def _fetch_narrative_lang(
-        self, idx: int, item: dict, lang: str, date_str: str, angle: dict
+        self, idx: int, item: dict, lang: str, date_str: str, style: dict
     ) -> tuple:
         max_retries = 3
         year = item.get("year", "")
         text = item.get("text", "")
         slug = item.get("slug", "")
         location = item.get("location") or "the location"
+        angle = style["angle"]
+        voice = style["voice"]
 
         lang_names = {
             "en": "English",
@@ -552,48 +647,53 @@ CANDIDATES:
 
         for attempt in range(1, max_retries + 1):
             prompt = f"""
-You are a journalist writing a short feature for a history magazine.
-One article, one event, around 700 words. The audience is a curious adult who knows
-the headline but wants to actually understand what happened and why it matters.
-Write in {lang_full}.
+You are an essayist and storyteller writing for a smart, curious reader — think of the
+popular-history writers who can make you laugh, teach you something real, and keep you
+reading to the very last line. One article, one event, around 600 words. Write in {lang_full}.
 
 EVENT: {year} — {text}
 WIKIPEDIA: {slug}
 DATE: {date_str}, {year}
 LOCATION: {location}
 
-EDITORIAL LENS: {angle['name']}
+STRUCTURAL LENS — {angle['name']}:
 {angle['instruction']}
 
-WHAT THE PIECE NEEDS:
-Open with something that makes the reader want to keep going — a scene, a fact,
-a surprising detail, a quote. Not a formula. The opening should feel like the most
-interesting sentence you know about this event.
+VOICE — {voice['name']}:
+{voice['instruction']}
 
-Then tell the story in a straight line: what was the situation before,
-what happened, what it meant. Include the science or mechanics if it's a discovery
-or invention — explain it simply, without jargon. Include the human side:
-who were the real people involved, what did they want, what did they risk?
+This article must NOT sound like the other pieces published the same day. Its shape comes
+from the lens; its personality comes from the voice. Make both unmistakable. If a reader saw
+two of your articles side by side, they should feel written by two different, talented people.
 
-Weave in specific numbers and facts throughout — ages, distances, dates, costs,
-casualties, durations. Not as a list, but as proof embedded in the prose.
-"Many people died" tells nothing. "Of the 300 who entered, 11 walked out" tells everything.
+HOW TO WRITE IT:
+- Open with the single most interesting thing you know about this event — a scene, a strange
+  number, a line someone actually said. Never open with the date or with "On this day."
+  The first sentence is a hook, not a header.
+- Explain what happened so clearly a curious teenager would understand it — but never talk
+  down. If there's science, engineering, or politics underneath, unpack it in plain language.
+  The explanation should be the satisfying part, not a chore.
+- Drop in one or two genuinely surprising facts — the kind of detail a reader repeats to
+  someone else the same day. Delightful trivia, not filler. Make me go "huh, I didn't know that."
+- Let it be fun where the material allows: dry wit, a wink, an absurd human detail. Read the
+  room of the event — never force humor onto tragedy, but never be needlessly solemn either.
+- Use real numbers as evidence, woven into the sentences, never as a list. "Many people died"
+  tells nothing; "Of the 300 who went in, 11 walked out" tells everything.
+- Name real people. Quote them when you know the actual words.
+- End on the detail that reframes the whole thing — an irony, a forgotten consequence, a twist.
+  No summary, no moral, no "and that is why." Just land the last image and stop.
 
-End with the one detail that reframes the story — an irony, a forgotten fact,
-a consequence nobody saw coming. No summary. No "and that is why." Just the detail.
+RHYTHM: Mix short punchy sentences with longer flowing ones. Present tense for the key moment,
+past tense for everything else. Vary paragraph length. If a sentence is boring, cut it.
 
-TONE: Direct, confident, slightly irreverent. Not academic. Not moralizing.
-Mix short sentences (for impact) with longer ones (for context). Vary the rhythm.
-Use present tense when describing the key moment; past tense for everything else.
-Name real people. Quote them if you know what they said.
-
-WHAT TO AVOID:
+BANNED PHRASES (clichés that make every article sound the same):
 "it is worth noting" / "history tells us" / "changed the course of history" /
 "left an indelible mark" / "without a doubt" / "subsequently" / "in conclusion" /
-"serves as a reminder" / "stands as a testament" / "it is no coincidence."
+"serves as a reminder" / "stands as a testament" / "it is no coincidence" /
+"little did they know" / "on this day" / "fast forward" / "needless to say".
 
-LENGTH: 500–800 words. Aim for 600. If the event genuinely has less to say, 300 words
-of tight, accurate prose beats 700 words of filler. No headers. Paragraphs separated by blank lines.
+LENGTH: 500–800 words. Aim for 600. A tight 350 words beats a padded 700. No headers.
+Paragraphs separated by blank lines.
 LANGUAGE: Entire text in {lang_full}. Zero English except proper nouns.
 
 Return JSON: {{ "content": "full article here — paragraphs separated by blank lines" }}
@@ -603,13 +703,13 @@ Return JSON: {{ "content": "full article here — paragraphs separated by blank 
                 prompt,
                 f"Narrative {idx}:{lang} (attempt {attempt})",
                 {"content": ""},
-                temperature=0.7,
+                temperature=0.8,
                 max_tokens=4096,
             )
             content = res.get("content", "")
             last_content = content
 
-            is_valid, reason = self._validate_narrative(content, lang, angle)
+            is_valid, reason = self._validate_narrative(content, lang, style)
             if is_valid:
                 logger.info(f"✅ Narrative {idx}:{lang} — passed (attempt {attempt})")
                 return lang, content
@@ -621,7 +721,7 @@ Return JSON: {{ "content": "full article here — paragraphs separated by blank 
         logger.error(f"🚨 Narrative {idx}:{lang} — all {max_retries} attempts failed")
         return lang, last_content if last_content else ""
 
-    def _validate_narrative(self, content: str, lang: str, angle: dict) -> tuple:
+    def _validate_narrative(self, content: str, lang: str, style: dict) -> tuple:
         if not content or len(content.strip()) < 50:
             return False, "Empty or too short"
 
@@ -663,7 +763,7 @@ Return JSON: {{ "content": "full article here — paragraphs separated by blank 
         return True, "OK"
 
     async def _verify_and_patch_narratives(
-        self, results: dict, top_events: list, date_str: str, angle_assignments: list
+        self, results: dict, top_events: list, date_str: str, style_assignments: list
     ) -> dict:
         patch_tasks = []
 
@@ -676,14 +776,14 @@ Return JSON: {{ "content": "full article here — paragraphs separated by blank 
                 logger.error(f"🚨 Event {idx}: English missing or too short — regenerating")
                 patch_tasks.append(
                     self._emergency_regenerate(
-                        idx, item, "en", date_str, angle_assignments[idx], results
+                        idx, item, "en", date_str, style_assignments[idx], results
                     )
                 )
 
             for lang in ["ro", "es", "de", "fr"]:
                 content = narratives.get(lang, "")
                 is_valid, reason = self._validate_narrative(
-                    content, lang, angle_assignments[idx]
+                    content, lang, style_assignments[idx]
                 )
                 if not is_valid:
                     logger.warning(f"⚠️ Event {idx}:{lang} failed: {reason} — patching")
@@ -710,9 +810,9 @@ Return JSON: {{ "content": "full article here — paragraphs separated by blank 
         return results
 
     async def _emergency_regenerate(
-        self, idx: int, item: dict, lang: str, date_str: str, angle: dict, results: dict
+        self, idx: int, item: dict, lang: str, date_str: str, style: dict, results: dict
     ):
-        _, content = await self._fetch_narrative_lang(idx, item, lang, date_str, angle)
+        _, content = await self._fetch_narrative_lang(idx, item, lang, date_str, style)
         event_key = f"EVENT_{idx}"
         if event_key not in results:
             results[event_key] = {}
