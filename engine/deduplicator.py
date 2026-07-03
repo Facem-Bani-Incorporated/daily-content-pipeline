@@ -170,6 +170,42 @@ class EventDeduplicator:
             logger.warning(f"⚠️ Could not check events for {target_date}: {e} — assuming initial mode")
             return False
 
+    def existing_slugs_for_date(self, target_date) -> set:
+        """
+        Wikipedia slugs already stored for this calendar day (any year).
+        Passed to discovery so the AI does not re-propose events we already
+        published — prevents repeats up front instead of only filtering after.
+        Empty on the first run for a date (initial mode).
+        """
+        try:
+            conn = self._get_connection()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT source_url FROM events
+                WHERE EXTRACT(MONTH FROM event_date) = %s
+                  AND EXTRACT(DAY FROM event_date) = %s
+                """,
+                (target_date.month, target_date.day),
+            )
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            slugs = set()
+            for (url,) in rows:
+                if url:
+                    slug = str(url).split("/wiki/")[-1].strip()
+                    if slug:
+                        slugs.add(slug)
+            logger.info(
+                f"🧭 {len(slugs)} already-published slugs for {target_date} "
+                f"(discovery exclusion)"
+            )
+            return slugs
+        except Exception as e:
+            logger.warning(f"⚠️ Could not load existing slugs for {target_date}: {e}")
+            return set()
+
     def load_top_events_for_date(
         self, target_date, is_pro: bool, limit: int, exclude_slugs: set = None
     ) -> list:

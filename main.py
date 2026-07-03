@@ -276,7 +276,8 @@ async def run_free_pipeline(
 ) -> tuple:
     mode = "REFRESH" if is_refresh else "INITIAL"
     logger.info(f"🆓 FREE [{mode}] — Discovering events for {today.strftime('%B %d')}...")
-    all_events = await processor.discover_events(today)
+    known_slugs = deduper.existing_slugs_for_date(today)
+    all_events = await processor.discover_events(today, exclude_slugs=known_slugs)
     all_events = _dedupe_by_slug(all_events, "FREE-discover")
     logger.info(f"📋 FREE got {len(all_events)} unique validated events")
 
@@ -424,7 +425,8 @@ async def run_pro_pipeline(
 ) -> tuple:
     mode = "REFRESH" if is_refresh else "INITIAL"
     logger.info(f"💎 PRO [{mode}] — Discovering personalities/media/sport for {today.strftime('%B %d')}...")
-    pro_candidates = await processor.discover_pro_events(today)
+    pro_known_slugs = deduper.existing_slugs_for_date(today)
+    pro_candidates = await processor.discover_pro_events(today, exclude_slugs=pro_known_slugs)
     pro_candidates = _dedupe_by_slug(pro_candidates, "PRO-discover")
     logger.info(f"📋 PRO got {len(pro_candidates)} unique candidates")
 

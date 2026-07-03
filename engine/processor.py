@@ -196,12 +196,25 @@ class AIProcessor:
             e["location"] = None
         return e
 
+    @staticmethod
+    def _build_avoid_block(exclude_slugs: set = None) -> str:
+        """Prompt block listing already-published slugs the AI must not repeat."""
+        if not exclude_slugs:
+            return ""
+        listed = ", ".join(sorted(exclude_slugs))
+        return (
+            "\nALREADY PUBLISHED — do NOT return any of these Wikipedia articles. "
+            "Find DIFFERENT events instead (go more niche if you must):\n"
+            f"{listed}\n"
+        )
+
     # ══════════════════════════════════════════════════════════════
     # PASS 1 — Discovery
     # ══════════════════════════════════════════════════════════════
-    async def discover_events(self, target_date: datetime) -> list:
+    async def discover_events(self, target_date: datetime, exclude_slugs: set = None) -> list:
         date_str = self._get_target_date_str(target_date)
         month, day = self._get_month_day(target_date)
+        avoid_block = self._build_avoid_block(exclude_slugs)
 
         prompt = f"""
 You are a meticulous Senior Historian and Fact-Checker.
@@ -212,10 +225,17 @@ CRITICAL RULES:
    - If an event started on a different day, it does NOT count.
 2. WIKIPEDIA: "slug" MUST be the exact Wikipedia article title.
 3. YEAR ACCURACY: Exact year of the event.
-4. NO HALLUCINATIONS: If unsure, EXCLUDE.
-5. QUANTITY: 50-60 events, never sacrifice accuracy.
+4. NO HALLUCINATIONS: If unsure, EXCLUDE. Accuracy always beats volume.
+5. QUANTITY: Return as MANY accurate events as you can find — aim for 60+.
+   Cast a wide net across all of world history for this exact day.
 6. DIVERSITY: Different centuries, regions, categories.
-
+7. DEPTH OVER FAME: if there aren't many globally famous events on this date,
+   dig deeper instead of giving up — include well-documented but lesser-known
+   ones (regional milestones, scientific/technical firsts, notable births &
+   deaths, cultural or sporting curiosities). A thin or empty list is a failure:
+   always come back with a rich set of real events. Lesser-known is welcome;
+   invented or misdated is not.
+{avoid_block}
 STRICT JSON SCHEMA:
 {{
   "events": [
@@ -261,10 +281,11 @@ ONLY HIGH confidence.
     # ══════════════════════════════════════════════════════════════
     # PRO DISCOVERY
     # ══════════════════════════════════════════════════════════════
-    async def discover_pro_events(self, target_date: datetime) -> list:
+    async def discover_pro_events(self, target_date: datetime, exclude_slugs: set = None) -> list:
         date_str = self._get_target_date_str(target_date)
         month, day = self._get_month_day(target_date)
         pro_cats = ["personalities", "media", "sport"]
+        avoid_block = self._build_avoid_block(exclude_slugs)
 
         prompt = f"""
 You are a Senior Pop-Culture & Entertainment Historian.
@@ -277,10 +298,12 @@ List PREMIUM historical events for {date_str} (month={month}, day={day}) — STR
 HARD RULES:
 1. DATE: Must be EXACTLY {date_str}.
 2. WIKIPEDIA: "slug" must match exact article title.
-3. FAME: Only globally famous people/events.
-4. 5+ per category, 20-30 total.
+3. FAME: Prefer globally famous people/events — but if a category is thin for this
+   date, go deeper and add strong regional or era-defining picks so every category
+   is represented. Never leave a category empty. Never invent; accuracy over fame.
+4. Aim for 6+ per category, 25-40 total. More is better.
 5. Only HIGH confidence.
-
+{avoid_block}
 STRICT JSON SCHEMA:
 {{
   "events": [
@@ -705,6 +728,15 @@ This article must NOT sound like the other pieces published the same day. Its sh
 from the lens; its personality comes from the voice. Make both unmistakable. If a reader saw
 two of your articles side by side, they should feel written by two different, talented people.
 
+TONE — the constant beneath every voice: be deeply informative first. The reader should
+finish genuinely knowing more than they did — the facts, the how, the why, delivered with
+real authority. Underneath that, run a thread of dry, intelligent irony: notice the absurd,
+the gap between what people intended and what they actually got. Let a genuinely funny line
+land RARELY — once, maybe twice in the whole piece — and only where the material earns it.
+Wit is seasoning, not the meal: if every paragraph is winking, it turns smug and exhausting.
+Most sentences do straight, substantial work; the humor is the occasional glint, never the
+point. Never force it onto tragedy. The voice above only changes HOW this is delivered.
+
 HOW TO WRITE IT:
 - Open with the single most interesting thing you know about this event — a scene, a strange
   number, a line someone actually said. Never open with the date or with "On this day."
@@ -714,8 +746,9 @@ HOW TO WRITE IT:
   The explanation should be the satisfying part, not a chore.
 - Drop in one or two genuinely surprising facts — the kind of detail a reader repeats to
   someone else the same day. Delightful trivia, not filler. Make me go "huh, I didn't know that."
-- Let it be fun where the material allows: dry wit, a wink, an absurd human detail. Read the
-  room of the event — never force humor onto tragedy, but never be needlessly solemn either.
+- Keep it mostly informative; let dry irony surface where the material invites it, and a
+  genuinely funny observation only once or twice in the whole piece — a wry aside, never a
+  joke pasted on. Read the room: never force humor onto tragedy, never be needlessly solemn.
 - Use real numbers as evidence, woven into the sentences, never as a list. "Many people died"
   tells nothing; "Of the 300 who went in, 11 walked out" tells everything.
 - Name real people. Quote them when you know the actual words.
