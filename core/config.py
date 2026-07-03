@@ -8,10 +8,14 @@ class Settings(BaseSettings):
     # Core
     WIKI_BASE_URL: str = "https://en.wikipedia.org/api/rest_v1"
     USER_AGENT: str = "DailyHistoryApp/2.0 (contact@yourdomain.com)"
-    AI_MODEL: str = "moonshotai/kimi-k2-instruct-0905"
+    AI_MODEL: str = "claude-haiku-4-5"
+    # Extended-thinking budget in tokens. Higher = deeper reasoning ("reasoning high").
+    # Set to 0 to disable thinking entirely.
+    AI_THINKING_BUDGET: int = 6000
 
     # API Keys
-    GROQ_API_KEY: str
+    ANTHROPIC_API_KEY: str
+    GROQ_API_KEY: Optional[str] = None  # legacy — kept during transition, no longer used
     CLOUDINARY_CLOUD_NAME: str
     CLOUDINARY_API_KEY: str
     CLOUDINARY_API_SECRET: str

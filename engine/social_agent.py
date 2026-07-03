@@ -13,15 +13,33 @@ Usage in main pipeline:
 """
 
 import json
+import re
 import os
 import requests as sync_requests
 from urllib.parse import quote
-from groq import Groq
+import anthropic
 from datetime import datetime
 from core.config import config
 from core.logger import setup_logger
 
 logger = setup_logger("SocialAgent")
+
+
+def _parse_ai_json(message) -> dict:
+    """Extract text blocks from an Anthropic message and parse JSON leniently."""
+    text = "".join(
+        b.text for b in message.content if getattr(b, "type", None) == "text"
+    ).strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end > start:
+            return json.loads(text[start:end + 1])
+        raise
 
 MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL", getattr(config, "MAKE_WEBHOOK_URL", None))
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK", getattr(config, "DISCORD_WEBHOOK", None))
@@ -29,8 +47,9 @@ DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK", getattr(config, "DISCORD_WEB
 
 class SocialMediaAgent:
     def __init__(self):
-        self.client = Groq(api_key=config.GROQ_API_KEY)
-        self.model = getattr(config, "SOCIAL_AI_MODEL", "llama-3.3-70b-versatile")
+        self.client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, timeout=600.0)
+        self.model = getattr(config, "SOCIAL_AI_MODEL", None) or config.AI_MODEL
+        self.thinking_budget = config.AI_THINKING_BUDGET
 
     # ══════════════════════════════════════════════════════════════
     # CLOUDINARY IMAGE TRANSFORMER
@@ -166,7 +185,7 @@ class SocialMediaAgent:
         logger.info(f"🎨 Styled post image: {styled_post_image[:80]}...")
         logger.info(f"📱 Story image: {styled_story_image[:80]}...")
 
-        # Step 3: Generate social media text content using Groq
+        # Step 3: Generate social media text content using Claude
         content = self._generate_social_content(event_data, target_date)
         if not content:
             logger.error("❌ Failed to generate social content")
@@ -231,11 +250,11 @@ class SocialMediaAgent:
         return data
 
     # ══════════════════════════════════════════════════════════════
-    # GROQ CONTENT GENERATION
+    # CLAUDE CONTENT GENERATION
     # ══════════════════════════════════════════════════════════════
 
     def _generate_social_content(self, event_data: dict, target_date: datetime) -> dict:
-        """Generate social media posts using Groq, based on REAL event data."""
+        """Generate social media posts using Claude, based on REAL event data."""
 
         main = event_data["main_event"]
         discovery = event_data["discovery_events"]
@@ -342,22 +361,27 @@ Return ONLY valid JSON:
 }}"""
 
         try:
-            completion = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a viral social media content creator for a history app. Output ONLY valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7,
-                max_tokens=3500,
-                response_format={"type": "json_object"},
+            budget = self.thinking_budget
+            kwargs = {
+                "model": self.model,
+                "max_tokens": (budget + 3500) if budget else 3500,
+                "system": (
+                    "You are a viral social media content creator for a history app. "
+                    "Output ONLY valid JSON. No markdown, no code fences."
+                ),
+                "messages": [{"role": "user", "content": prompt}],
+            }
+            if budget:
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            message = self.client.messages.create(**kwargs)
+
+            content = _parse_ai_json(message)
+
+            usage = message.usage
+            logger.info(
+                f"📊 Tokens: {usage.input_tokens} + {usage.output_tokens} "
+                f"= {usage.input_tokens + usage.output_tokens}"
             )
-
-            text = completion.choices[0].message.content.strip()
-            content = json.loads(text)
-
-            usage = completion.usage
-            logger.info(f"📊 Tokens: {usage.prompt_tokens} + {usage.completion_tokens} = {usage.total_tokens}")
 
             return content
 

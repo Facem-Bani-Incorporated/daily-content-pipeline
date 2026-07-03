@@ -1,12 +1,30 @@
 import asyncio
 import json
 import random
-from groq import Groq
+import re
+import anthropic
 from core.config import config
 from core.logger import setup_logger
 from schema.models import QuizTranslations, QuizQuestion, QuizOption
 
 logger = setup_logger("QuizGenerator")
+
+
+def _parse_ai_json(message) -> dict:
+    """Extract text blocks from an Anthropic message and parse JSON leniently."""
+    text = "".join(
+        b.text for b in message.content if getattr(b, "type", None) == "text"
+    ).strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end > start:
+            return json.loads(text[start:end + 1])
+        raise
 
 LANGUAGES = ["en", "ro", "es", "de", "fr"]
 VALID_IDS = {"a", "b", "c", "d"}
@@ -15,8 +33,11 @@ VALID_Q_IDS = {"q1", "q2", "q3", "q4"}
 
 class QuizGenerator:
     def __init__(self, model: str = config.AI_MODEL):
-        self.client = Groq(api_key=config.GROQ_API_KEY)
+        self.client = anthropic.AsyncAnthropic(
+            api_key=config.ANTHROPIC_API_KEY, timeout=600.0
+        )
         self.model = model
+        self.thinking_budget = config.AI_THINKING_BUDGET
 
     # ══════════════════════════════════════════════════════════════════════
     #  PUBLIC — Generate quizzes for a list of events
@@ -218,29 +239,24 @@ STRICT JSON — return ONLY this:
     # ══════════════════════════════════════════════════════════════════════
 
     async def _safe_call(self, prompt: str, context: str, retries: int = 2) -> dict | None:
-        """Call Groq with retry logic. Returns parsed JSON or None."""
+        """Call Claude (Haiku + extended thinking) with retry. Returns parsed JSON or None."""
         for attempt in range(retries + 1):
             try:
-                completion = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are a quiz generator API for a history app. "
-                                "Output ONLY valid JSON matching the exact schema requested. "
-                                "No markdown, no preamble, no commentary. Just the JSON object."
-                            ),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0.7,
-                    max_completion_tokens=8192,
-                    top_p=1,
-                    stream=False,
-                )
-                result = json.loads(completion.choices[0].message.content)
+                budget = self.thinking_budget
+                kwargs = {
+                    "model": self.model,
+                    "max_tokens": (budget + 8192) if budget else 8192,
+                    "system": (
+                        "You are a quiz generator API for a history app. "
+                        "Output ONLY valid JSON matching the exact schema requested. "
+                        "No markdown, no preamble, no commentary. Just the JSON object."
+                    ),
+                    "messages": [{"role": "user", "content": prompt}],
+                }
+                if budget:
+                    kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+                message = await self.client.messages.create(**kwargs)
+                result = _parse_ai_json(message)
                 logger.info(f"✅ {context} — AI call OK (attempt {attempt + 1})")
                 return result
 

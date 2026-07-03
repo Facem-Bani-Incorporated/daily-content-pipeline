@@ -2,7 +2,7 @@ import asyncio
 import json
 import re
 from datetime import datetime
-from groq import Groq
+import anthropic
 from core.config import config
 from schema.models import EventCategory
 from core.logger import setup_logger
@@ -10,10 +10,34 @@ from core.logger import setup_logger
 logger = setup_logger("AIProcessor")
 
 
+def _parse_ai_json(message) -> dict:
+    """Pull the text blocks out of an Anthropic message and parse JSON leniently.
+
+    With extended thinking on, the response is [thinking_block, text_block]; we only
+    want the text. Strips markdown fences and, as a last resort, the outermost braces.
+    """
+    text = "".join(
+        b.text for b in message.content if getattr(b, "type", None) == "text"
+    ).strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end > start:
+            return json.loads(text[start:end + 1])
+        raise
+
+
 class AIProcessor:
     def __init__(self, model: str = config.AI_MODEL):
-        self.client = Groq(api_key=config.GROQ_API_KEY)
+        self.client = anthropic.AsyncAnthropic(
+            api_key=config.ANTHROPIC_API_KEY, timeout=600.0
+        )
         self.model = model
+        self.thinking_budget = config.AI_THINKING_BUDGET
         self.categories_list = [c.value for c in EventCategory]
         self.languages = ["en", "ro", "es", "de", "fr"]
 
@@ -212,7 +236,7 @@ ALLOWED CATEGORIES: {self.categories_list}
 ONLY HIGH confidence.
 """
 
-        res = await self._safe_groq_call(prompt, f"Discovery ({date_str})", {"events": []})
+        res = await self._safe_ai_call(prompt, f"Discovery ({date_str})", {"events": []})
         events = res.get("events", [])
 
         validated = []
@@ -276,7 +300,7 @@ STRICT JSON SCHEMA:
 ALLOWED: {pro_cats}
 """
 
-        res = await self._safe_groq_call(
+        res = await self._safe_ai_call(
             prompt, f"PRO Discovery ({date_str})", {"events": []}
         )
         events = res.get("events", [])
@@ -387,7 +411,7 @@ CANDIDATES:
 {candidates_text}
 """
 
-        res = await self._safe_groq_call(prompt, "PRO Deep Rank", {"selections": []})
+        res = await self._safe_ai_call(prompt, "PRO Deep Rank", {"selections": []})
 
         selected = []
         seen_ids = set()
@@ -508,12 +532,27 @@ CANDIDATES:
         )
 
         prompt = f"""
-Rank the 15 most globally impactful events for {date_str}.
+You are a rigorous historian curating a "Today in History" feed for {date_str}.
+From the CANDIDATES below, select and rank the 15 most significant events.
 
-CRITERIA: global reach, permanence, universal recognition, emotional power, uniqueness.
-DIVERSITY: at least 3 different centuries, 3 different categories.
+Reason through each candidate before scoring it. Score on five components:
+  • GLOBAL REACH (0–30) — did it affect the whole world, or just one region?
+  • PERMANENCE (0–25) — are the consequences still felt today?
+  • UNIVERSAL RECOGNITION (0–20) — would an educated person anywhere recognize it?
+  • EMOTIONAL POWER (0–15) — human drama, stakes, a story worth telling.
+  • UNIQUENESS (0–5) — a real "first" or turning point, not a routine occurrence.
 
-STRICT JSON:
+deep_score = the sum of those five components (0–100). Rank by deep_score, highest first.
+
+HARD RULES:
+  1. World-changing beats locally-important. A famous-but-regional event still loses
+     to a pivotal global one — significance, not mere name recognition.
+  2. DIVERSITY: the top 15 must span at least 3 different centuries AND 3 different
+     categories. Do not stack the list with one era or one theme.
+  3. Only rank candidates that are given, by their exact ID. Never invent events.
+  4. Titles are short, vivid, specific headlines — never "An event on {date_str}".
+
+Return ONLY this JSON (score_breakdown MUST sum to deep_score):
 {{
   "top15": [
     {{
@@ -532,7 +571,7 @@ CANDIDATES:
 {candidates_text}
 """
 
-        res = await self._safe_groq_call(prompt, "Deep Rank", {"top15": []})
+        res = await self._safe_ai_call(prompt, "Deep Rank", {"top15": []})
         id_map = {f"ID_{i}": e for i, e in enumerate(candidates)}
 
         enriched = []
@@ -699,7 +738,7 @@ LANGUAGE: Entire text in {lang_full}. Zero English except proper nouns.
 Return JSON: {{ "content": "full article here — paragraphs separated by blank lines" }}
 """
 
-            res = await self._safe_groq_call(
+            res = await self._safe_ai_call(
                 prompt,
                 f"Narrative {idx}:{lang} (attempt {attempt})",
                 {"content": ""},
@@ -849,7 +888,7 @@ ENGLISH:
 Return JSON: {{ "content": "translated narrative in {lang_full}" }}
 """
 
-        res = await self._safe_groq_call(
+        res = await self._safe_ai_call(
             prompt, f"Translation {idx}:{target_lang}", {"content": ""}, temperature=0.3, max_tokens=4096
         )
         translated = res.get("content", "")
@@ -916,7 +955,7 @@ Return JSON with language codes as keys:
 {{ {', '.join([f'"{l}": "title in {lang_names[l]}"' for l in missing_langs])} }}
 """
 
-        res = await self._safe_groq_call(prompt, f"Title repair {idx}", {})
+        res = await self._safe_ai_call(prompt, f"Title repair {idx}", {})
         titles = item.get("titles", {})
         for lang in missing_langs:
             fixed = res.get(lang, "")
@@ -927,142 +966,37 @@ Return JSON with language codes as keys:
         item["titles"] = titles
 
     # ══════════════════════════════════════════════════════════════
-    # SAFE GROQ CALL
+    # SAFE AI CALL  (Claude Haiku + extended thinking)
     # ══════════════════════════════════════════════════════════════
-    async def _safe_groq_call(
+    async def _safe_ai_call(
         self,
         prompt: str,
         context: str,
         fallback: dict,
-        temperature: float = 0.4,
+        temperature: float = 0.4,   # kept for call-site compatibility; unused with thinking
         max_tokens: int = 4096,
+        thinking_budget: int | None = None,
     ) -> dict:
+        budget = self.thinking_budget if thinking_budget is None else thinking_budget
         try:
-            completion = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a strict History API. Output ONLY valid JSON. Never include markdown.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                response_format={"type": "json_object"},
-                temperature=temperature,
-                max_completion_tokens=max_tokens,
-            )
-            raw = completion.choices[0].message.content
-            return json.loads(raw)
+            kwargs = {
+                "model": self.model,
+                # thinking tokens count toward output, so give the answer its own headroom
+                "max_tokens": (budget + max_tokens) if budget else max_tokens,
+                "system": (
+                    "You are a strict History API. Output ONLY valid JSON. "
+                    "No markdown, no code fences, no commentary."
+                ),
+                "messages": [{"role": "user", "content": prompt}],
+            }
+            if budget:
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            message = await self.client.messages.create(**kwargs)
+            return _parse_ai_json(message)
         except json.JSONDecodeError as e:
             logger.error(f"🚨 JSON Parse Error ({context}): {e}")
             return fallback
         except Exception as e:
-            # Groq returns 400 json_validate_failed when the model generates
-            # literal newlines inside a JSON string value.
-            # The content is correct — just the JSON encoding is broken.
-            # Try to recover from the failed_generation field in the error body.
-            recovered = self._recover_from_json_validate_failed(e, context)
-            if recovered is not None:
-                return recovered
             logger.error(f"🚨 AI Error ({context}): {e}")
             return fallback
 
-    def _recover_from_json_validate_failed(self, exc: Exception, context: str) -> dict | None:
-        """
-        When Groq raises json_validate_failed (400), the error body contains
-        the raw attempted generation under 'failed_generation'. Two known failure modes:
-          1. Literal newlines inside a JSON string value  → fix with char-by-char escaper
-          2. Content value written without quotes at all  → extract with regex
-        """
-        try:
-            body = getattr(exc, "body", None)
-            if not isinstance(body, dict):
-                return None
-            failed_gen = body.get("error", {}).get("failed_generation", "")
-            if not failed_gen:
-                return None
-
-            # Strategy 1: direct parse (works occasionally)
-            try:
-                result = json.loads(failed_gen)
-                logger.info(f"✅ ({context}) recovered JSON from failed_generation directly")
-                return result
-            except json.JSONDecodeError:
-                pass
-
-            # Strategy 2: fix unescaped newlines inside quoted string values
-            try:
-                fixed = self._escape_newlines_in_json_strings(failed_gen)
-                result = json.loads(fixed)
-                logger.info(f"✅ ({context}) recovered JSON after escaping newlines in strings")
-                return result
-            except json.JSONDecodeError:
-                pass
-
-            # Strategy 3: content value is completely unquoted
-            # e.g. { "content": \n  Some text...\n" }
-            extracted = self._extract_unquoted_content_field(failed_gen)
-            if extracted:
-                logger.info(f"✅ ({context}) recovered JSON by extracting unquoted content field")
-                return extracted
-
-        except Exception as recover_err:
-            logger.debug(f"⚠️ JSON recovery failed for ({context}): {recover_err}")
-        return None
-
-    @staticmethod
-    def _extract_unquoted_content_field(raw: str) -> dict | None:
-        """
-        Handle: { "content": \n  Actual text here... \n" }
-        The model wrote the value without an opening quote.
-        Find everything after `"content":` and strip trailing JSON cruft.
-        """
-        m = re.search(r'"content"\s*:\s*\n?\s*', raw)
-        if not m:
-            return None
-
-        content = raw[m.end():]
-
-        # Strip leading quote if partially quoted
-        if content.startswith('"'):
-            content = content[1:]
-
-        # Strip trailing closing braces, stray quotes, whitespace
-        content = content.rstrip()
-        while content and content[-1] in ('}', '"', '\n', '\r', ' '):
-            content = content[:-1].rstrip()
-
-        content = content.strip()
-        if len(content) > 50:
-            return {"content": content}
-        return None
-
-    @staticmethod
-    def _escape_newlines_in_json_strings(raw: str) -> str:
-        """
-        Walk the raw JSON character by character.
-        Inside a JSON string value, replace literal \\n / \\r with \\\\n / \\\\r.
-        Leaves structural whitespace (outside strings) untouched.
-        """
-        result = []
-        in_string = False
-        escape_next = False
-
-        for ch in raw:
-            if escape_next:
-                result.append(ch)
-                escape_next = False
-            elif ch == "\\":
-                result.append(ch)
-                escape_next = True
-            elif ch == '"':
-                in_string = not in_string
-                result.append(ch)
-            elif in_string and ch == "\n":
-                result.append("\\n")
-            elif in_string and ch == "\r":
-                result.append("\\r")
-            else:
-                result.append(ch)
-
-        return "".join(result)
