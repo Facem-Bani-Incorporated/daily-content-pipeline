@@ -815,19 +815,29 @@ async def main():
             day_offset_env = None
 
     if day_offset_env is None:
-        # Auto-detect: check if today and tomorrow are already populated
+        # Auto-detect which of the next 3 days need processing, deciding
+        # PER DAY (not all-or-nothing) so a hole on a single middle day
+        # (e.g. a missed run left tomorrow empty) always gets backfilled.
+        #   - Day+2 (farthest) is ALWAYS processed — refresh if it already has
+        #     events, initial if not — so the rolling window keeps advancing.
+        #   - Today / tomorrow are processed ONLY if they have NO events yet.
+        #     Skipping already-covered earlier days avoids redundant work and,
+        #     crucially, avoids re-firing the social agent for today every run.
         checker = EventDeduplicator()
-        today_populated = checker.has_events_for_date(today.date())
-        tomorrow_populated = checker.has_events_for_date((today + timedelta(days=1)).date())
-
-        if today_populated and tomorrow_populated:
-            logger.info(
-                "🚀 Pipeline — today and tomorrow already have events → processing day+2 only"
-            )
-            dates_to_process = [(2, today + timedelta(days=2))]
-        else:
-            logger.info("🚀 Pipeline — running full 3-day window")
-            dates_to_process = [(i, today + timedelta(days=i)) for i in range(3)]
+        dates_to_process = []
+        for i in range(3):
+            d = today + timedelta(days=i)
+            covered = checker.has_events_for_date(d.date())
+            if i == 2 or not covered:
+                dates_to_process.append((i, d))
+            else:
+                logger.info(
+                    f"↩️ {day_labels[i]} ({d.date()}) already has events → skipping"
+                )
+        logger.info(
+            "🚀 Pipeline — auto-detect will process: "
+            + ", ".join(f"{day_labels[i]}({d.date()})" for i, d in dates_to_process)
+        )
 
     scraper = WikiScraper()
     processor = AIProcessor()
