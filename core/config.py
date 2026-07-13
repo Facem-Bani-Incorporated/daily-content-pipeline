@@ -9,9 +9,13 @@ class Settings(BaseSettings):
     WIKI_BASE_URL: str = "https://en.wikipedia.org/api/rest_v1"
     USER_AGENT: str = "DailyHistoryApp/2.0 (contact@yourdomain.com)"
     AI_MODEL: str = "claude-haiku-4-5"
-    # Extended-thinking budget in tokens. Higher = deeper reasoning ("reasoning high").
-    # Set to 0 to disable thinking entirely.
-    AI_THINKING_BUDGET: int = 6000
+    # Extended-thinking budget in tokens. Thinking tokens bill as OUTPUT ($5/MTok on
+    # Haiku 4.5), so this is the single biggest cost lever. Only discovery/ranking use
+    # it (they benefit from reasoning about date accuracy + significance). The high-volume
+    # creative/mechanical calls — narratives, quizzes, translations, titles, social —
+    # pass thinking_budget=0 explicitly and run WITHOUT thinking. Set to 0 to disable
+    # thinking everywhere.
+    AI_THINKING_BUDGET: int = 2000
 
     # API Keys
     ANTHROPIC_API_KEY: str

@@ -1,7 +1,7 @@
 from datetime import date
 from enum import Enum
 from typing import List, Optional
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field
 
 
 class EventCategory(str, Enum):
@@ -37,6 +37,12 @@ class Translations(BaseModel):
     fr: str = "Data pending"
 
 
+def _empty_translations() -> "Translations":
+    """Blank per-language strings — used as the notification default so the app's
+    client-side fallback kicks in when a language has no generated hook."""
+    return Translations(en="", ro="", es="", de="", fr="")
+
+
 class QuizOption(BaseModel):
     id: str
     text: str
@@ -68,6 +74,10 @@ class EventDetail(BaseModel):
     source_url: str
     title_translations: Translations
     narrative_translations: Translations
+    # Per-language push-notification hook (TikTok-style). Two parallel Translations so the
+    # Java backend can reuse its existing translations table for each.
+    notification_title_translations: Translations = Field(default_factory=_empty_translations)
+    notification_body_translations: Translations = Field(default_factory=_empty_translations)
     impact_score: float
     page_views_30d: int = 0
     gallery: List[str] = []

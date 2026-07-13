@@ -37,7 +37,9 @@ class QuizGenerator:
             api_key=config.ANTHROPIC_API_KEY, timeout=600.0
         )
         self.model = model
-        self.thinking_budget = config.AI_THINKING_BUDGET
+        # Quizzes are mechanical (pick 4 plausible options, mark the right one) — no
+        # thinking budget. Thinking bills as output, so this was pure waste here.
+        self.thinking_budget = 0
 
     # ══════════════════════════════════════════════════════════════════════
     #  PUBLIC — Generate quizzes for a list of events

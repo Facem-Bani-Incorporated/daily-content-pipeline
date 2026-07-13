@@ -631,7 +631,15 @@ CANDIDATES:
                 self._fetch_narrative_lang(idx, item, lang, date_str, style)
                 for lang in self.languages
             ])
-            return f"EVENT_{idx}", dict(lang_results)
+            # Each result is (lang, content, notification{title,body}).
+            # Narrative text goes into the results map; the per-language notification
+            # hook is stashed on the item so _build_event_details can attach it.
+            content_map = {}
+            notif_map = item.setdefault("notifications", {})
+            for lang, content, notif in lang_results:
+                content_map[lang] = content
+                notif_map[lang] = notif
+            return f"EVENT_{idx}", content_map
 
         results = dict(
             await asyncio.gather(*[process_single(i, item) for i, item in enumerate(top_events)])
@@ -768,7 +776,25 @@ LENGTH: 500–800 words. Aim for 600. A tight 350 words beats a padded 700. No h
 Paragraphs separated by blank lines.
 LANGUAGE: Entire text in {lang_full}. Zero English except proper nouns.
 
-Return JSON: {{ "content": "full article here — paragraphs separated by blank lines" }}
+PUSH NOTIFICATION — also write a phone notification for THIS event, in {lang_full}.
+It is a HOOK, not a label. It must spark curiosity about THIS specific event — never
+announce that the app has new content. Use the formula that works on TikTok:
+underdog/rebel vs. authority → escalation → twist, compressed into one line.
+  BAD:  "Your daily event is ready!"
+  BAD:  "Today in history: the French Revolution"
+  GOOD: "1793: a 24-year-old woman walks into a bathroom and changes the French Revolution."
+- notification_title: MAX 40 characters. The event's subject must be recognizable, but the
+  hook comes first — a strange number, a name, a stake. Not a headline label.
+- notification_body: MAX 120 characters. One tight line that lands the curiosity gap. Must
+  fit a push notification without truncation.
+- Both entirely in {lang_full}. No emoji.
+
+Return JSON:
+{{
+  "content": "full article here — paragraphs separated by blank lines",
+  "notification_title": "≤40 char hook title in {lang_full}",
+  "notification_body": "≤120 char hook body in {lang_full}"
+}}
 """
 
             res = await self._safe_ai_call(
@@ -777,21 +803,36 @@ Return JSON: {{ "content": "full article here — paragraphs separated by blank 
                 {"content": ""},
                 temperature=0.8,
                 max_tokens=4096,
+                thinking_budget=0,  # creative writing gets nothing from reasoning tokens
             )
             content = res.get("content", "")
+            notif = self._clean_notification(
+                res.get("notification_title", ""), res.get("notification_body", "")
+            )
             last_content = content
 
             is_valid, reason = self._validate_narrative(content, lang, style)
             if is_valid:
                 logger.info(f"✅ Narrative {idx}:{lang} — passed (attempt {attempt})")
-                return lang, content
+                return lang, content, notif
             else:
                 logger.warning(
                     f"⚠️ Narrative {idx}:{lang} attempt {attempt}: {reason}"
                 )
 
         logger.error(f"🚨 Narrative {idx}:{lang} — all {max_retries} attempts failed")
-        return lang, last_content if last_content else ""
+        return lang, (last_content if last_content else ""), {"title": "", "body": ""}
+
+    @staticmethod
+    def _clean_notification(title: str, body: str) -> dict:
+        """Trim a generated hook to push-notification limits (best-effort)."""
+        title = (title or "").strip().strip('"')
+        body = (body or "").strip().strip('"')
+        if len(title) > 45:
+            title = title[:44].rstrip() + "…"
+        if len(body) > 130:
+            body = body[:129].rstrip() + "…"
+        return {"title": title, "body": body}
 
     def _validate_narrative(self, content: str, lang: str, style: dict) -> tuple:
         if not content or len(content.strip()) < 50:
@@ -859,7 +900,7 @@ Return JSON: {{ "content": "full article here — paragraphs separated by blank 
                 )
                 if not is_valid:
                     logger.warning(f"⚠️ Event {idx}:{lang} failed: {reason} — patching")
-                    patch_tasks.append(self._patch_from_english(idx, lang, results))
+                    patch_tasks.append(self._patch_from_english(idx, item, lang, results))
 
         if patch_tasks:
             logger.info(f"🔧 Patching {len(patch_tasks)} narrative(s)...")
@@ -884,19 +925,21 @@ Return JSON: {{ "content": "full article here — paragraphs separated by blank 
     async def _emergency_regenerate(
         self, idx: int, item: dict, lang: str, date_str: str, style: dict, results: dict
     ):
-        _, content = await self._fetch_narrative_lang(idx, item, lang, date_str, style)
+        _, content, notif = await self._fetch_narrative_lang(idx, item, lang, date_str, style)
         event_key = f"EVENT_{idx}"
         if event_key not in results:
             results[event_key] = {}
         # Only update if we actually got something back
         if content and len(content.strip()) >= 200:
             results[event_key][lang] = content
+            if notif.get("title") or notif.get("body"):
+                item.setdefault("notifications", {})[lang] = notif
         else:
             logger.error(f"🚨 Emergency regenerate for {idx}:{lang} also failed — keeping previous value")
             if not results[event_key].get(lang):
                 results[event_key][lang] = content  # keep whatever we have, even if short
 
-    async def _patch_from_english(self, idx: int, target_lang: str, results: dict):
+    async def _patch_from_english(self, idx: int, item: dict, target_lang: str, results: dict):
         event_key = f"EVENT_{idx}"
         en_content = results.get(event_key, {}).get("en", "")
         if not en_content or len(en_content.split()) < 200:
@@ -906,25 +949,44 @@ Return JSON: {{ "content": "full article here — paragraphs separated by blank 
         lang_names = {"ro": "Romanian", "es": "Spanish", "de": "German", "fr": "French"}
         lang_full = lang_names.get(target_lang, target_lang.upper())
 
+        # Carry the English notification hook along so we translate it in the same call
+        # (no extra API request) instead of leaving this language without a hook.
+        en_notif = item.get("notifications", {}).get("en", {"title": "", "body": ""})
+
         prompt = f"""
-Translate this historical narrative into {lang_full}.
+Translate this historical narrative AND its push notification into {lang_full}.
 
 Keep the voice — the short punchy sentences, the rhythm, the journalist tone.
 Do not smooth it into academic prose. If the English has a fragment for impact, keep the fragment.
 All numbers stay as digits. Proper nouns use their standard {lang_full} form.
 Blank lines between paragraphs. First sentence stays under 10 words.
+The notification stays a curiosity HOOK, not a label: keep title ≤40 chars, body ≤120 chars.
 Output only in {lang_full} — no English except proper nouns.
 
-ENGLISH:
+ENGLISH ARTICLE:
 {en_content}
 
-Return JSON: {{ "content": "translated narrative in {lang_full}" }}
+ENGLISH NOTIFICATION TITLE: {en_notif.get('title', '')}
+ENGLISH NOTIFICATION BODY: {en_notif.get('body', '')}
+
+Return JSON:
+{{
+  "content": "translated narrative in {lang_full}",
+  "notification_title": "translated ≤40 char hook title",
+  "notification_body": "translated ≤120 char hook body"
+}}
 """
 
         res = await self._safe_ai_call(
-            prompt, f"Translation {idx}:{target_lang}", {"content": ""}, temperature=0.3, max_tokens=4096
+            prompt, f"Translation {idx}:{target_lang}", {"content": ""},
+            temperature=0.3, max_tokens=4096, thinking_budget=0,
         )
         translated = res.get("content", "")
+        notif = self._clean_notification(
+            res.get("notification_title", ""), res.get("notification_body", "")
+        )
+        if notif.get("title") or notif.get("body"):
+            item.setdefault("notifications", {})[target_lang] = notif
 
         if translated and len(translated.split()) >= 200:
             results[event_key][target_lang] = translated
@@ -988,7 +1050,7 @@ Return JSON with language codes as keys:
 {{ {', '.join([f'"{l}": "title in {lang_names[l]}"' for l in missing_langs])} }}
 """
 
-        res = await self._safe_ai_call(prompt, f"Title repair {idx}", {})
+        res = await self._safe_ai_call(prompt, f"Title repair {idx}", {}, thinking_budget=0)
         titles = item.get("titles", {})
         for lang in missing_langs:
             fixed = res.get(lang, "")
@@ -1023,7 +1085,11 @@ Return JSON with language codes as keys:
                 "messages": [{"role": "user", "content": prompt}],
             }
             if budget:
+                # Extended thinking requires temperature unset (Haiku pins it to 1).
                 kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            else:
+                # No thinking → temperature is free to use for creative variety.
+                kwargs["temperature"] = temperature
             message = await self.client.messages.create(**kwargs)
             return _parse_ai_json(message)
         except json.JSONDecodeError as e:

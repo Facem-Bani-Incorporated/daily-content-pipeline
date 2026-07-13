@@ -20,12 +20,16 @@ from schema.models import DailyPayload, EventDetail, EventCategory, Translations
 
 logger = setup_logger("MainPipeline")
 
-# How many events we want at the end of each pipeline
-TARGET_FREE_COUNT = 6
+# How many events we want at the end of each pipeline.
+# App layout: 2 "main" heroes (1 FREE + 1 PRO, the highest-impact of each tier) and
+# 7 secondary (4 FREE + 3 PRO). Totals: FREE = 5, PRO = 4. The main/secondary split is
+# derived on the client from impact_score ordering, not stored — the pipeline just
+# produces the right counts.
+TARGET_FREE_COUNT = 5
 TARGET_PRO_COUNT = 4  # 1 personalities + 1 media + 1 sport + 1 extra (best-of-the-rest)
 
 # Minimum acceptable count before we fall back to non-validated events
-MIN_FREE_COUNT = 6
+MIN_FREE_COUNT = 5
 MIN_PRO_COUNT = 4
 
 # Minimum final_score (0-100) for a NEW event to be accepted in refresh mode.
@@ -149,6 +153,8 @@ async def send_to_java(payload: DailyPayload):
             "category": ev.category.value,
             "titleTranslations": ev.title_translations.model_dump(),
             "narrativeTranslations": ev.narrative_translations.model_dump(),
+            "notificationTitleTranslations": ev.notification_title_translations.model_dump(),
+            "notificationBodyTranslations": ev.notification_body_translations.model_dump(),
             "eventDate": ev.event_date.isoformat(),
             "impactScore": float(ev.impact_score),
             "sourceUrl": str(ev.source_url),
@@ -644,6 +650,12 @@ async def _build_event_details(
         titles = item.get("titles", {lang: "Historical Event" for lang in ["en", "ro", "es", "de", "fr"]})
         event_quiz = quizzes[idx] if idx < len(quizzes) else None
 
+        # Per-language notification hooks stashed on the item by the narrative generator.
+        # Missing → empty string, so the app falls back to its client-side template.
+        notifs = item.get("notifications", {})
+        notif_titles = {lang: (notifs.get(lang) or {}).get("title", "") for lang in ["en", "ro", "es", "de", "fr"]}
+        notif_bodies = {lang: (notifs.get(lang) or {}).get("body", "") for lang in ["en", "ro", "es", "de", "fr"]}
+
         try:
             category_enum = EventCategory(item["category"].lower())
         except ValueError:
@@ -658,6 +670,8 @@ async def _build_event_details(
                 source_url=f"https://en.wikipedia.org/wiki/{slug}",
                 title_translations=Translations(**titles),
                 narrative_translations=Translations(**narrative_data),
+                notification_title_translations=Translations(**notif_titles),
+                notification_body_translations=Translations(**notif_bodies),
                 impact_score=float(item["final_score"]),
                 page_views_30d=item["views"],
                 gallery=gallery,

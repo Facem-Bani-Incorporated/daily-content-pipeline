@@ -49,7 +49,8 @@ class SocialMediaAgent:
     def __init__(self):
         self.client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, timeout=600.0)
         self.model = getattr(config, "SOCIAL_AI_MODEL", None) or config.AI_MODEL
-        self.thinking_budget = config.AI_THINKING_BUDGET
+        # Social copy is a single daily call — no thinking budget (bills as output).
+        self.thinking_budget = 0
 
     # ══════════════════════════════════════════════════════════════
     # CLOUDINARY IMAGE TRANSFORMER
