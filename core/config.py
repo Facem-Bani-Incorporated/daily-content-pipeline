@@ -5,7 +5,7 @@ from pydantic import ConfigDict, field_validator
 # Default LLM provider + model. All providers below speak the OpenAI-compatible API,
 # so the pipeline talks to one client (core/llm.py) and only these env vars change.
 DEFAULT_PROVIDER = "gemini"
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3.5-flash"
 
 
 class Settings(BaseSettings):

@@ -19,14 +19,15 @@ from openai import OpenAI, AsyncOpenAI
 from core.config import config
 
 # Per-provider wiring. `reasoning` = whether the model accepts `reasoning_effort`;
-# `idle_effort` = the effort value for non-reasoning (creative) calls ("none" disables
-# thinking on Gemini for the cheapest calls; Groq has no "none", so it uses "low").
+# `idle_effort` = the effort value for non-reasoning (creative) calls. We use "low"
+# rather than "none": "low" is accepted by every Gemini flash model (some newer ones
+# reject "none") and still keeps thinking — and cost — minimal.
 _PROVIDERS = {
     "gemini": {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
         "key_attrs": ("GEMINI_API_KEY", "OPENAI_API_KEY"),
         "reasoning": True,
-        "idle_effort": "none",
+        "idle_effort": "low",
     },
     "openai": {
         "base_url": None,  # SDK default (api.openai.com)
