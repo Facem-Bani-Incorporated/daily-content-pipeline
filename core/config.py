@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     # ranking pass a budget (they benefit from reasoning about date accuracy +
     # significance); creative/mechanical calls pass 0 and run at "low" effort.
     AI_THINKING_BUDGET: int = 2000
+    # Global reasoning effort for gpt-oss on Groq: "low" | "medium" | "high".
+    # "low" keeps per-call tokens small (kinder to the free-tier TPM limit) and
+    # reduces JSON truncation; gpt-oss-120b stays strong. Bump if you want richer
+    # discovery/ranking reasoning and your Groq tier has the token headroom.
+    AI_REASONING_EFFORT: str = "low"
 
     # API Keys
     GROQ_API_KEY: str

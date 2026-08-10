@@ -1050,25 +1050,32 @@ Return JSON with language codes as keys:
         thinking_budget: int | None = None,
     ) -> dict:
         budget = self.thinking_budget if thinking_budget is None else thinking_budget
-        try:
-            params = build_params(
-                model=self.model,
-                system=(
-                    "You are a strict History API. Output ONLY valid JSON. "
-                    "No markdown, no code fences, no commentary."
-                ),
-                prompt=prompt,
-                max_tokens=max_tokens,
-                # Reasoning models ignore temperature when reasoning is on; harmless to pass.
-                temperature=temperature,
-                thinking_budget=budget,
-            )
-            message = await self.client.chat.completions.create(**params)
-            return parse_json_response(message)
-        except json.JSONDecodeError as e:
-            logger.error(f"🚨 JSON Parse Error ({context}): {e}")
-            return fallback
-        except Exception as e:
-            logger.error(f"🚨 AI Error ({context}): {e}")
-            return fallback
+        params = build_params(
+            model=self.model,
+            system=(
+                "You are a strict History API. Output ONLY valid JSON. "
+                "No markdown, no code fences, no commentary."
+            ),
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            thinking_budget=budget,
+        )
+        # The Groq SDK already retries 429s (honouring retry-after); this outer loop
+        # additionally recovers from an occasional empty/invalid generation.
+        last_err = None
+        for attempt in range(3):
+            try:
+                message = await self.client.chat.completions.create(**params)
+                return parse_json_response(message)
+            except json.JSONDecodeError as e:
+                last_err = e
+                logger.warning(f"⚠️ JSON parse retry ({context}, attempt {attempt + 1}): {e}")
+            except Exception as e:
+                last_err = e
+                logger.warning(f"⚠️ AI error retry ({context}, attempt {attempt + 1}): {e}")
+            if attempt < 2:
+                await asyncio.sleep(2 * (attempt + 1))
+        logger.error(f"🚨 AI Error ({context}) — all attempts failed: {last_err}")
+        return fallback
 

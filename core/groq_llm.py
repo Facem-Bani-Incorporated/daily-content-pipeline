@@ -30,23 +30,40 @@ _async_client = None
 _sync_client = None
 
 
+# The SDK retries 429s automatically, honouring Groq's `retry-after` header. Groq's
+# free tier caps tokens-per-minute low, so parallel calls burst past it; a generous
+# retry count lets them serialise into the rolling window instead of hard-failing.
+_MAX_RETRIES = 10
+
+# Reasoning tokens on gpt-oss count toward the completion budget, so we pad
+# max_completion_tokens per effort level to keep the JSON answer from being truncated
+# (a truncated answer = invalid JSON).
+_REASONING_HEADROOM = {"low": 1024, "medium": 4096, "high": 8192}
+
+
 def get_async_client() -> AsyncGroq:
     global _async_client
     if _async_client is None:
-        _async_client = AsyncGroq(api_key=config.GROQ_API_KEY, timeout=600.0)
+        _async_client = AsyncGroq(
+            api_key=config.GROQ_API_KEY, timeout=600.0, max_retries=_MAX_RETRIES
+        )
     return _async_client
 
 
 def get_sync_client() -> Groq:
     global _sync_client
     if _sync_client is None:
-        _sync_client = Groq(api_key=config.GROQ_API_KEY, timeout=600.0)
+        _sync_client = Groq(
+            api_key=config.GROQ_API_KEY, timeout=600.0, max_retries=_MAX_RETRIES
+        )
     return _sync_client
 
 
-def _reasoning_effort(thinking_budget: int) -> str:
-    """Map the legacy Anthropic thinking budget onto Groq's reasoning_effort."""
-    return "medium" if thinking_budget and thinking_budget > 0 else "low"
+def _reasoning_effort() -> str:
+    """Global reasoning effort for gpt-oss. Lower = fewer tokens (kinder to the TPM
+    limit) and less truncation risk; gpt-oss-120b is strong even at 'low'."""
+    effort = str(getattr(config, "AI_REASONING_EFFORT", "low")).lower()
+    return effort if effort in _REASONING_HEADROOM else "low"
 
 
 def build_params(
@@ -55,20 +72,28 @@ def build_params(
     prompt: str,
     max_tokens: int,
     temperature: float | None = None,
-    thinking_budget: int = 0,
-    json_mode: bool = True,
+    thinking_budget: int = 0,  # accepted for call-site compatibility; effort is global now
+    json_mode: bool = False,
 ) -> dict:
-    """Assemble Groq chat.completions kwargs from Anthropic-style inputs."""
+    """Assemble Groq chat.completions kwargs from Anthropic-style inputs.
+
+    We deliberately do NOT use Groq's json_object response_format: with gpt-oss its
+    constrained decoding intermittently returns an empty/invalid generation
+    (`json_validate_failed`). The system prompts already demand pure JSON and
+    `parse_json_response` extracts it leniently — the same approach that worked on
+    Anthropic.
+    """
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
+    effort = _reasoning_effort()
     params: dict = {
         "model": model,
         "messages": messages,
-        "max_completion_tokens": max_tokens,
-        "reasoning_effort": _reasoning_effort(thinking_budget),
+        "max_completion_tokens": max_tokens + _REASONING_HEADROOM[effort],
+        "reasoning_effort": effort,
     }
     if temperature is not None:
         params["temperature"] = temperature
