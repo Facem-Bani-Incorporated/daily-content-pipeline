@@ -88,10 +88,37 @@ _sync_client = None
 
 
 def _provider_name() -> str:
-    # .strip() matters: a pasted env value like "vertex " (trailing space/newline)
-    # would otherwise not match and silently fall back to the default provider.
-    name = str(getattr(config, "AI_PROVIDER", "gemini")).strip().lower()
-    return name if name in _PROVIDERS else "gemini"
+    # Prefer an explicit AI_PROVIDER (strip() guards against a pasted "vertex " value).
+    name = str(getattr(config, "AI_PROVIDER", "") or "").strip().lower()
+    if name in _PROVIDERS:
+        return name
+    # Auto-detect from whatever credentials are present — robust to a missing/typo'd
+    # AI_PROVIDER (the user's Railway env keeps getting mangled). A service account
+    # implies Vertex; otherwise pick by which API key exists.
+    if getattr(config, "GOOGLE_SERVICE_ACCOUNT_JSON", None) and getattr(config, "GCP_PROJECT", None):
+        return "vertex"
+    if getattr(config, "GEMINI_API_KEY", None):
+        return "gemini"
+    if getattr(config, "OPENAI_API_KEY", None):
+        return "openai"
+    if getattr(config, "GROQ_API_KEY", None):
+        return "groq"
+    return "gemini"
+
+
+def log_config_diagnostics() -> None:
+    """One-shot log of which LLM-related env vars actually reached the app — so a
+    mangled variable name in the host shows up instead of silently defaulting."""
+    def present(attr):
+        return "set" if getattr(config, attr, None) else "MISSING"
+    logger.info(
+        "🔎 LLM env → "
+        f"AI_PROVIDER={str(getattr(config, 'AI_PROVIDER', None))!r} "
+        f"GCP_PROJECT={str(getattr(config, 'GCP_PROJECT', None))!r} "
+        f"SERVICE_ACCOUNT={present('GOOGLE_SERVICE_ACCOUNT_JSON')} "
+        f"GEMINI_KEY={present('GEMINI_API_KEY')} "
+        f"→ resolved provider={_provider_name()}"
+    )
 
 
 def _provider() -> dict:
@@ -158,6 +185,7 @@ def _base_url(prov: dict):
 def get_async_client() -> AsyncOpenAI:
     global _async_client
     if _async_client is None:
+        log_config_diagnostics()
         prov = _provider()
         base = _base_url(prov)
         logger.info(f"🤖 LLM client → provider={_provider_name()} model={config.AI_MODEL} base_url={base}")
@@ -170,6 +198,7 @@ def get_async_client() -> AsyncOpenAI:
 def get_sync_client() -> OpenAI:
     global _sync_client
     if _sync_client is None:
+        log_config_diagnostics()
         prov = _provider()
         base = _base_url(prov)
         logger.info(f"🤖 LLM client → provider={_provider_name()} model={config.AI_MODEL} base_url={base}")
