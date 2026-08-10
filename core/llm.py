@@ -88,7 +88,10 @@ _sync_client = None
 
 
 def _provider_name() -> str:
-    return str(getattr(config, "AI_PROVIDER", "gemini")).lower()
+    # .strip() matters: a pasted env value like "vertex " (trailing space/newline)
+    # would otherwise not match and silently fall back to the default provider.
+    name = str(getattr(config, "AI_PROVIDER", "gemini")).strip().lower()
+    return name if name in _PROVIDERS else "gemini"
 
 
 def _provider() -> dict:
@@ -156,11 +159,10 @@ def get_async_client() -> AsyncOpenAI:
     global _async_client
     if _async_client is None:
         prov = _provider()
+        base = _base_url(prov)
+        logger.info(f"🤖 LLM client → provider={_provider_name()} model={config.AI_MODEL} base_url={base}")
         _async_client = AsyncOpenAI(
-            api_key=_resolve_key(prov),
-            base_url=_base_url(prov),
-            timeout=600.0,
-            max_retries=_MAX_RETRIES,
+            api_key=_resolve_key(prov), base_url=base, timeout=600.0, max_retries=_MAX_RETRIES,
         )
     return _async_client
 
@@ -169,11 +171,10 @@ def get_sync_client() -> OpenAI:
     global _sync_client
     if _sync_client is None:
         prov = _provider()
+        base = _base_url(prov)
+        logger.info(f"🤖 LLM client → provider={_provider_name()} model={config.AI_MODEL} base_url={base}")
         _sync_client = OpenAI(
-            api_key=_resolve_key(prov),
-            base_url=_base_url(prov),
-            timeout=600.0,
-            max_retries=_MAX_RETRIES,
+            api_key=_resolve_key(prov), base_url=base, timeout=600.0, max_retries=_MAX_RETRIES,
         )
     return _sync_client
 
@@ -212,6 +213,7 @@ def build_params(
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
+    model = str(model).strip()
     # Vertex addresses Gemini models as "google/<model>".
     if prov.get("vertex") and not model.startswith("google/"):
         model = f"google/{model}"
