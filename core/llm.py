@@ -95,15 +95,29 @@ def _provider() -> dict:
     return _PROVIDERS.get(_provider_name(), _PROVIDERS["gemini"])
 
 
+def _load_service_account_info() -> dict:
+    """Parse the service account credentials from GOOGLE_SERVICE_ACCOUNT_JSON.
+
+    Accepts either the raw JSON or a base64-encoded JSON. base64 is the safe way to set
+    it in a hosting UI (Railway): a single line with no quotes/newlines/`=` that would
+    otherwise be mis-split into stray, empty-named variables.
+    """
+    raw = getattr(config, "GOOGLE_SERVICE_ACCOUNT_JSON", None)
+    if not raw:
+        raise RuntimeError("AI_PROVIDER=vertex needs GOOGLE_SERVICE_ACCOUNT_JSON (raw JSON or base64).")
+    raw = raw.strip()
+    if not raw.startswith("{"):
+        import base64
+        raw = base64.b64decode(raw).decode("utf-8")
+    return json.loads(raw)
+
+
 def _vertex_token() -> str:
     """Mint a short-lived OAuth token from the service account JSON for Vertex AI."""
     from google.oauth2 import service_account
     from google.auth.transport.requests import Request as GAuthRequest
 
-    raw = getattr(config, "GOOGLE_SERVICE_ACCOUNT_JSON", None)
-    if not raw:
-        raise RuntimeError("AI_PROVIDER=vertex needs GOOGLE_SERVICE_ACCOUNT_JSON (the service account JSON).")
-    info = json.loads(raw)
+    info = _load_service_account_info()
     creds = service_account.Credentials.from_service_account_info(
         info, scopes=["https://www.googleapis.com/auth/cloud-platform"]
     )
