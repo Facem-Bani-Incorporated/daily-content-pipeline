@@ -2,13 +2,16 @@ from typing import Optional
 from pydantic_settings import BaseSettings  # <--- Aceasta este linia salvatoare
 from pydantic import ConfigDict, field_validator
 
+GROQ_DEFAULT_MODEL = "openai/gpt-oss-120b"
+
+
 class Settings(BaseSettings):
     model_config = ConfigDict(env_file=".env", env_file_encoding='utf-8', extra='ignore')
 
     # Core
     WIKI_BASE_URL: str = "https://en.wikipedia.org/api/rest_v1"
     USER_AGENT: str = "DailyHistoryApp/2.0 (contact@yourdomain.com)"
-    AI_MODEL: str = "openai/gpt-oss-120b"
+    AI_MODEL: str = GROQ_DEFAULT_MODEL
     # Legacy "thinking budget" lever, kept for call-site compatibility. Groq has no
     # extended-thinking billing; for reasoning models (e.g. gpt-oss) this maps onto
     # Groq's `reasoning_effort` (budget > 0 -> "medium", 0 -> "low"). Only discovery/
@@ -30,6 +33,17 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: Optional[str] = None
     MAX_CANDIDATES_FOR_AI: int = 200
+
+    @field_validator("AI_MODEL", mode="before")
+    @classmethod
+    def force_groq_model(cls, v: Optional[str]) -> str:
+        # We migrated off Anthropic. A stale AI_MODEL env var (e.g. a leftover
+        # "claude-haiku-4-5" in Railway) would otherwise override the code default
+        # and make every call 404 on Groq. Coerce any Anthropic-style model — or an
+        # empty value — back to the Groq default so the pipeline can't be broken by env.
+        if not v or str(v).lower().startswith("claude"):
+            return GROQ_DEFAULT_MODEL
+        return v
 
     @field_validator("JAVA_BACKEND_URL")
     @classmethod
