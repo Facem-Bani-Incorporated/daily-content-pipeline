@@ -3,7 +3,7 @@ import json
 import random
 import re
 from core.config import config
-from core.groq_llm import get_async_client, build_params, parse_json_response
+from core.llm import get_async_client, build_params, parse_json_response
 from core.logger import setup_logger
 from schema.models import QuizTranslations, QuizQuestion, QuizOption
 

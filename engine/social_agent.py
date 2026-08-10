@@ -19,7 +19,7 @@ import requests as sync_requests
 from urllib.parse import quote
 from datetime import datetime
 from core.config import config
-from core.groq_llm import get_sync_client, build_params, parse_json_response
+from core.llm import get_sync_client, build_params, parse_json_response
 from core.logger import setup_logger
 
 logger = setup_logger("SocialAgent")

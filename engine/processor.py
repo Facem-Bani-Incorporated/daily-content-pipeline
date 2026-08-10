@@ -3,7 +3,7 @@ import json
 import re
 from datetime import datetime
 from core.config import config
-from core.groq_llm import get_async_client, build_params, parse_json_response
+from core.llm import get_async_client, build_params, parse_json_response
 from schema.models import EventCategory
 from core.logger import setup_logger
 

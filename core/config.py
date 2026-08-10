@@ -2,7 +2,10 @@ from typing import Optional
 from pydantic_settings import BaseSettings  # <--- Aceasta este linia salvatoare
 from pydantic import ConfigDict, field_validator
 
-GROQ_DEFAULT_MODEL = "openai/gpt-oss-120b"
+# Default LLM provider + model. All providers below speak the OpenAI-compatible API,
+# so the pipeline talks to one client (core/llm.py) and only these env vars change.
+DEFAULT_PROVIDER = "gemini"
+DEFAULT_MODEL = "gemini-2.5-flash"
 
 
 class Settings(BaseSettings):
@@ -11,27 +14,32 @@ class Settings(BaseSettings):
     # Core
     WIKI_BASE_URL: str = "https://en.wikipedia.org/api/rest_v1"
     USER_AGENT: str = "DailyHistoryApp/2.0 (contact@yourdomain.com)"
-    AI_MODEL: str = GROQ_DEFAULT_MODEL
-    # Legacy "thinking budget" lever, kept for call-site compatibility. Groq has no
-    # extended-thinking billing; for reasoning models (e.g. gpt-oss) this maps onto
-    # Groq's `reasoning_effort` (budget > 0 -> "medium", 0 -> "low"). Only discovery/
-    # ranking pass a budget (they benefit from reasoning about date accuracy +
-    # significance); creative/mechanical calls pass 0 and run at "low" effort.
-    AI_THINKING_BUDGET: int = 2000
-    # Reasoning effort applied ONLY to discovery/ranking (the accuracy-critical calls,
-    # budget > 0): "low" | "medium" | "high". At "low" gpt-oss hallucinates events not
-    # on the target date; "high" needs too many tokens to fit the free-tier 8000 TPM
-    # cap (single request 413s). "medium" is the sweet spot that fits and still reasons.
-    # After upgrading Groq tier, bump to "high" and raise AI_MAX_COMPLETION_TOKENS.
-    AI_REASONING_EFFORT: str = "medium"
-    # Hard cap on max_completion_tokens PER REQUEST. Groq counts this fully against the
-    # tokens-per-minute limit up front, so on the free tier (8000 TPM) a single request
-    # must stay well under it or it 413s. Raise this once you're on a paid tier.
-    AI_MAX_COMPLETION_TOKENS: int = 6000
 
-    # API Keys
-    GROQ_API_KEY: str
-    ANTHROPIC_API_KEY: Optional[str] = None  # legacy — kept during transition, no longer used
+    # ── LLM provider ────────────────────────────────────────────────
+    # AI_PROVIDER selects which OpenAI-compatible backend core/llm.py talks to:
+    # "gemini" (Google), "openai", or "groq". Pick the matching API key below.
+    AI_PROVIDER: str = DEFAULT_PROVIDER
+    AI_MODEL: str = DEFAULT_MODEL
+    AI_BASE_URL: Optional[str] = None  # override the provider's default base URL if ever needed
+
+    # Legacy "thinking budget" lever, kept for call-site compatibility. It no longer sets
+    # a token budget; it only flags which calls are accuracy-critical (budget > 0 →
+    # discovery/ranking) so those get reasoning while creative/mechanical calls don't.
+    AI_THINKING_BUDGET: int = 2000
+    # Reasoning effort for discovery/ranking (budget > 0): "low" | "medium" | "high".
+    # These calls must reason about which events truly fall on a date, else the model
+    # hallucinates and the Wikipedia validator rejects everything. Creative calls skip
+    # reasoning entirely. Ignored by providers/models that don't support it (e.g. gpt-4o-mini).
+    AI_REASONING_EFFORT: str = "medium"
+    # Hard cap on max output tokens per request. Gemini's limits are generous so 8192 is
+    # fine; lower it if you ever run on a tight tokens-per-minute tier (e.g. Groq free).
+    AI_MAX_COMPLETION_TOKENS: int = 8192
+
+    # API Keys — set the one matching AI_PROVIDER
+    GEMINI_API_KEY: Optional[str] = None
+    OPENAI_API_KEY: Optional[str] = None
+    GROQ_API_KEY: Optional[str] = None
+    ANTHROPIC_API_KEY: Optional[str] = None  # legacy — no longer used
     CLOUDINARY_CLOUD_NAME: str
     CLOUDINARY_API_KEY: str
     CLOUDINARY_API_SECRET: str
@@ -46,13 +54,16 @@ class Settings(BaseSettings):
 
     @field_validator("AI_MODEL", mode="before")
     @classmethod
-    def force_groq_model(cls, v: Optional[str]) -> str:
-        # We migrated off Anthropic. A stale AI_MODEL env var (e.g. a leftover
-        # "claude-haiku-4-5" in Railway) would otherwise override the code default
-        # and make every call 404 on Groq. Coerce any Anthropic-style model — or an
-        # empty value — back to the Groq default so the pipeline can't be broken by env.
-        if not v or str(v).lower().startswith("claude"):
-            return GROQ_DEFAULT_MODEL
+    def force_supported_model(cls, v: Optional[str]) -> str:
+        # A stale AI_MODEL env var from a previous provider (e.g. a leftover
+        # "claude-haiku-4-5" or "openai/gpt-oss-120b" in Railway) would override the
+        # code default and break every call. Coerce any known-foreign model — or an
+        # empty value — back to the current default so env can't silently break it.
+        if not v:
+            return DEFAULT_MODEL
+        low = str(v).lower()
+        if low.startswith("claude") or low.startswith("openai/gpt-oss") or "haiku" in low:
+            return DEFAULT_MODEL
         return v
 
     @field_validator("JAVA_BACKEND_URL")
