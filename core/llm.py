@@ -14,6 +14,7 @@ Call sites keep passing the old Anthropic-style inputs (`system`, `prompt`,
 import json
 import re
 
+from json_repair import repair_json
 from openai import OpenAI, AsyncOpenAI
 
 from core.config import config
@@ -28,18 +29,21 @@ _PROVIDERS = {
         "key_attrs": ("GEMINI_API_KEY", "OPENAI_API_KEY"),
         "reasoning": True,
         "idle_effort": "low",
+        "json_mode": True,  # Gemini's json_object mode is reliable → guaranteed-valid JSON
     },
     "openai": {
         "base_url": None,  # SDK default (api.openai.com)
         "key_attrs": ("OPENAI_API_KEY",),
         "reasoning": False,  # gpt-4o-mini etc. reject reasoning_effort
         "idle_effort": None,
+        "json_mode": True,
     },
     "groq": {
         "base_url": "https://api.groq.com/openai/v1",
         "key_attrs": ("GROQ_API_KEY",),
         "reasoning": True,
         "idle_effort": "low",
+        "json_mode": False,  # gpt-oss constrained decoding returns empty/invalid — use lenient parse
     },
 }
 
@@ -116,13 +120,15 @@ def build_params(
     max_tokens: int,
     temperature: float | None = None,
     thinking_budget: int = 0,
-    json_mode: bool = False,
+    json_mode: bool | None = None,
 ) -> dict:
     """Assemble OpenAI-compatible chat.completions kwargs from Anthropic-style inputs.
 
-    We rely on a strict system prompt + lenient parsing rather than a provider JSON
-    mode, so behaviour is identical across Gemini/OpenAI/Groq.
+    JSON mode defaults to the provider's capability (reliable on Gemini/OpenAI, off on
+    Groq gpt-oss whose constrained decoding returns empty output). A strict system
+    prompt + lenient parsing back it up either way.
     """
+    prov = _provider()
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -137,11 +143,12 @@ def build_params(
     if temperature is not None:
         params["temperature"] = temperature
 
-    effort = _reasoning_effort(_provider(), thinking_budget)
+    effort = _reasoning_effort(prov, thinking_budget)
     if effort is not None:
         params["reasoning_effort"] = effort
 
-    if json_mode:
+    use_json = prov.get("json_mode", False) if json_mode is None else json_mode
+    if use_json:
         params["response_format"] = {"type": "json_object"}
     return params
 
@@ -159,7 +166,11 @@ def parse_json_response(resp) -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        start, end = text.find("{"), text.rfind("}")
-        if start != -1 and end > start:
-            return json.loads(text[start:end + 1])
-        raise
+        pass
+    # Narrow to the outermost object, then let json_repair fix the common LLM defects
+    # (unescaped inner quotes, trailing commas, stray newlines) — cheaper than a retry,
+    # which matters on rate-limited tiers.
+    start, end = text.find("{"), text.rfind("}")
+    candidate = text[start:end + 1] if (start != -1 and end > start) else text
+    repaired = repair_json(candidate)
+    return json.loads(repaired)
