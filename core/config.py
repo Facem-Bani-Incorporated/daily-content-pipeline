@@ -20,10 +20,14 @@ class Settings(BaseSettings):
     AI_THINKING_BUDGET: int = 2000
     # Reasoning effort applied ONLY to discovery/ranking (the accuracy-critical calls,
     # budget > 0): "low" | "medium" | "high". At "low" gpt-oss hallucinates events not
-    # on the target date and the Wikipedia validator rejects them all, so this defaults
-    # to "high". Creative/mechanical calls always run at "low". Drop to "medium" if the
-    # free-tier TPM limit makes discovery too slow.
-    AI_REASONING_EFFORT: str = "high"
+    # on the target date; "high" needs too many tokens to fit the free-tier 8000 TPM
+    # cap (single request 413s). "medium" is the sweet spot that fits and still reasons.
+    # After upgrading Groq tier, bump to "high" and raise AI_MAX_COMPLETION_TOKENS.
+    AI_REASONING_EFFORT: str = "medium"
+    # Hard cap on max_completion_tokens PER REQUEST. Groq counts this fully against the
+    # tokens-per-minute limit up front, so on the free tier (8000 TPM) a single request
+    # must stay well under it or it 413s. Raise this once you're on a paid tier.
+    AI_MAX_COMPLETION_TOKENS: int = 6000
 
     # API Keys
     GROQ_API_KEY: str

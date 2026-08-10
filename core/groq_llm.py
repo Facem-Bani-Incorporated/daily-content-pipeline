@@ -37,8 +37,9 @@ _MAX_RETRIES = 10
 
 # Reasoning tokens on gpt-oss count toward the completion budget, so we pad
 # max_completion_tokens per effort level to keep the JSON answer from being truncated
-# (a truncated answer = invalid JSON).
-_REASONING_HEADROOM = {"low": 1024, "medium": 4096, "high": 8192}
+# (a truncated answer = invalid JSON). Kept modest because Groq counts
+# max_completion_tokens fully against the per-minute limit up front.
+_REASONING_HEADROOM = {"low": 512, "medium": 2048, "high": 4096}
 
 
 def get_async_client() -> AsyncGroq:
@@ -97,10 +98,14 @@ def build_params(
     messages.append({"role": "user", "content": prompt})
 
     effort = _reasoning_effort(thinking_budget)
+    # Cap the per-request completion budget: Groq reserves max_completion_tokens against
+    # the TPM limit up front, so anything over the tier cap 413s ("request too large").
+    cap = int(getattr(config, "AI_MAX_COMPLETION_TOKENS", 6000))
+    max_completion = min(max_tokens + _REASONING_HEADROOM[effort], cap)
     params: dict = {
         "model": model,
         "messages": messages,
-        "max_completion_tokens": max_tokens + _REASONING_HEADROOM[effort],
+        "max_completion_tokens": max_completion,
         "reasoning_effort": effort,
     }
     if temperature is not None:
