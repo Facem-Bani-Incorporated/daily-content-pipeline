@@ -87,23 +87,32 @@ _async_client = None
 _sync_client = None
 
 
-def _provider_name() -> str:
-    # Prefer an explicit AI_PROVIDER (strip() guards against a pasted "vertex " value).
-    name = str(getattr(config, "AI_PROVIDER", "") or "").strip().lower()
-    if name in _PROVIDERS:
-        return name
-    # Auto-detect from whatever credentials are present — robust to a missing/typo'd
-    # AI_PROVIDER (the user's Railway env keeps getting mangled). A service account
-    # implies Vertex; otherwise pick by which API key exists.
-    if getattr(config, "GOOGLE_SERVICE_ACCOUNT_JSON", None) and getattr(config, "GCP_PROJECT", None):
+def _has_credentials(name: str) -> bool:
+    prov = _PROVIDERS[name]
+    if prov.get("vertex"):
+        return bool(getattr(config, "GOOGLE_SERVICE_ACCOUNT_JSON", None) and getattr(config, "GCP_PROJECT", None))
+    return any(getattr(config, a, None) for a in prov["key_attrs"])
+
+
+def _autodetect_provider() -> str:
+    """Pick a provider from whatever credentials are actually present."""
+    if _has_credentials("vertex"):
         return "vertex"
-    if getattr(config, "GEMINI_API_KEY", None):
-        return "gemini"
-    if getattr(config, "OPENAI_API_KEY", None):
-        return "openai"
-    if getattr(config, "GROQ_API_KEY", None):
-        return "groq"
+    for name in ("gemini", "openai", "groq"):
+        if _has_credentials(name):
+            return name
     return "gemini"
+
+
+def _provider_name() -> str:
+    # Honour an explicit AI_PROVIDER (strip() guards a pasted "vertex " value) — but only
+    # if that provider actually has credentials. Otherwise auto-detect from what's set.
+    # This rescues the common case: AI_PROVIDER left on "gemini" after the gemini key was
+    # deleted, with a Vertex service account present → use Vertex.
+    name = str(getattr(config, "AI_PROVIDER", "") or "").strip().lower()
+    if name in _PROVIDERS and _has_credentials(name):
+        return name
+    return _autodetect_provider()
 
 
 def log_config_diagnostics() -> None:
