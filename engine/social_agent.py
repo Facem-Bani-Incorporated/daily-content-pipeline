@@ -19,7 +19,7 @@ import requests as sync_requests
 from urllib.parse import quote
 from datetime import datetime
 from core.config import config
-from core.llm import get_sync_client, build_params, parse_json_response
+from core.llm import get_sync_client, build_params, parse_json_response, chat
 from core.logger import setup_logger
 
 logger = setup_logger("SocialAgent")
@@ -356,7 +356,7 @@ Return ONLY valid JSON:
                 max_tokens=3500,
                 thinking_budget=self.thinking_budget,
             )
-            message = self.client.chat.completions.create(**params)
+            message = chat(params)
 
             content = parse_json_response(message)
 

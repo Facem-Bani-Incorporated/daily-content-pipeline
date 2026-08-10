@@ -18,6 +18,14 @@ from json_repair import repair_json
 from openai import OpenAI, AsyncOpenAI
 
 from core.config import config
+from core.logger import setup_logger
+
+logger = setup_logger("LLM")
+
+# A maintained Gemini alias that is always valid. If AI_MODEL is a typo (e.g.
+# "gemini-3.5-flas") or a retired model, the call 404s and we transparently retry
+# on this so the pipeline can't be broken by a bad env value.
+FALLBACK_MODEL = "gemini-flash-latest"
 
 # Per-provider wiring. `reasoning` = whether the model accepts `reasoning_effort`;
 # `idle_effort` = the effort value for non-reasoning (creative) calls. We use "low"
@@ -151,6 +159,38 @@ def build_params(
     if use_json:
         params["response_format"] = {"type": "json_object"}
     return params
+
+
+def _is_model_missing(err: Exception) -> bool:
+    """True if the error is a 'model not found / not supported' 404."""
+    if getattr(err, "status_code", None) == 404:
+        return True
+    msg = str(err).lower()
+    return "not found" in msg or "not supported" in msg or "model_not_found" in msg
+
+
+async def achat(params: dict):
+    """Async chat completion with automatic fallback if the model name is invalid."""
+    client = get_async_client()
+    try:
+        return await client.chat.completions.create(**params)
+    except Exception as e:
+        if _is_model_missing(e) and params.get("model") != FALLBACK_MODEL:
+            logger.warning(f"⚠️ model {params.get('model')!r} unavailable → retrying with {FALLBACK_MODEL}")
+            return await client.chat.completions.create(**{**params, "model": FALLBACK_MODEL})
+        raise
+
+
+def chat(params: dict):
+    """Sync chat completion with automatic fallback if the model name is invalid."""
+    client = get_sync_client()
+    try:
+        return client.chat.completions.create(**params)
+    except Exception as e:
+        if _is_model_missing(e) and params.get("model") != FALLBACK_MODEL:
+            logger.warning(f"⚠️ model {params.get('model')!r} unavailable → retrying with {FALLBACK_MODEL}")
+            return client.chat.completions.create(**{**params, "model": FALLBACK_MODEL})
+        raise
 
 
 def parse_json_response(resp) -> dict:

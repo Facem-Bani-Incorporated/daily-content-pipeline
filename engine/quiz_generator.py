@@ -3,7 +3,7 @@ import json
 import random
 import re
 from core.config import config
-from core.llm import get_async_client, build_params, parse_json_response
+from core.llm import get_async_client, build_params, parse_json_response, achat
 from core.logger import setup_logger
 from schema.models import QuizTranslations, QuizQuestion, QuizOption
 
@@ -236,7 +236,7 @@ STRICT JSON — return ONLY this:
                     max_tokens=8192,
                     thinking_budget=self.thinking_budget,
                 )
-                message = await self.client.chat.completions.create(**params)
+                message = await achat(params)
                 result = parse_json_response(message)
                 logger.info(f"✅ {context} — AI call OK (attempt {attempt + 1})")
                 return result

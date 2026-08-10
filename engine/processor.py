@@ -3,7 +3,7 @@ import json
 import re
 from datetime import datetime
 from core.config import config
-from core.llm import get_async_client, build_params, parse_json_response
+from core.llm import get_async_client, build_params, parse_json_response, achat
 from core.onthisday import fetch_otd_reference
 from schema.models import EventCategory
 from core.logger import setup_logger
@@ -1084,7 +1084,7 @@ Return JSON with language codes as keys:
         last_err = None
         for attempt in range(3):
             try:
-                message = await self.client.chat.completions.create(**params)
+                message = await achat(params)
                 return parse_json_response(message)
             except json.JSONDecodeError as e:
                 last_err = e
