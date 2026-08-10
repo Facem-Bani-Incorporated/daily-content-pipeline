@@ -17,10 +17,17 @@ class Settings(BaseSettings):
 
     # ── LLM provider ────────────────────────────────────────────────
     # AI_PROVIDER selects which OpenAI-compatible backend core/llm.py talks to:
-    # "gemini" (Google), "openai", or "groq". Pick the matching API key below.
+    # "gemini" (AI Studio key), "vertex" (Google Cloud, POSTPAID), "openai", or "groq".
     AI_PROVIDER: str = DEFAULT_PROVIDER
     AI_MODEL: str = DEFAULT_MODEL
     AI_BASE_URL: Optional[str] = None  # override the provider's default base URL if ever needed
+
+    # Vertex AI (AI_PROVIDER="vertex") — billed via Google Cloud = pay-at-month-end.
+    # Needs a GCP project with Vertex AI API enabled + billing linked, and a service
+    # account JSON (paste the whole JSON string into GOOGLE_SERVICE_ACCOUNT_JSON).
+    GCP_PROJECT: Optional[str] = None
+    GCP_LOCATION: str = "global"
+    GOOGLE_SERVICE_ACCOUNT_JSON: Optional[str] = None
 
     # Legacy "thinking budget" lever, kept for call-site compatibility. It no longer sets
     # a token budget; it only flags which calls are accuracy-critical (budget > 0 →
@@ -62,14 +69,10 @@ class Settings(BaseSettings):
         if not v:
             return DEFAULT_MODEL
         low = str(v).lower()
-        # Foreign providers' models, or Gemini models that Google retired for new users.
-        dead = ("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0", "gemini-1.5")
-        if (
-            low.startswith("claude")
-            or low.startswith("openai/gpt-oss")
-            or "haiku" in low
-            or low in dead
-        ):
+        # Only coerce clearly-foreign models from a previous provider. Retired Gemini
+        # names are left alone (Vertex uses different naming, and the runtime fallback
+        # in core/llm.py recovers from a 404 on AI Studio).
+        if low.startswith("claude") or low.startswith("openai/gpt-oss") or "haiku" in low:
             return DEFAULT_MODEL
         return v
 

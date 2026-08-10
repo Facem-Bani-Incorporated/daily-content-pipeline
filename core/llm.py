@@ -53,6 +53,26 @@ _PROVIDERS = {
         "idle_effort": "low",
         "json_mode": False,  # gpt-oss constrained decoding returns empty/invalid — use lenient parse
     },
+    # Google Cloud Vertex AI — same Gemini models, billed via Cloud Billing (POSTPAID).
+    # base_url is built from GCP_PROJECT/GCP_LOCATION and auth is a short-lived OAuth
+    # token minted from the service account (not a static API key). Models are addressed
+    # as "google/<model>".
+    "vertex": {
+        "base_url": None,  # built dynamically in _base_url()
+        "key_attrs": (),   # token minted in _resolve_key()
+        "reasoning": True,
+        "idle_effort": "low",
+        "json_mode": True,
+        "vertex": True,
+    },
+}
+
+# Provider-appropriate fallback model when AI_MODEL is invalid/retired (used by achat/chat).
+_FALLBACK_MODEL = {
+    "gemini": "gemini-flash-latest",
+    "vertex": "google/gemini-2.5-flash",
+    "openai": "gpt-4o-mini",
+    "groq": "llama-3.3-70b-versatile",
 }
 
 # The SDK retries 429s automatically, honouring the provider's retry-after header.
@@ -62,12 +82,33 @@ _async_client = None
 _sync_client = None
 
 
+def _provider_name() -> str:
+    return str(getattr(config, "AI_PROVIDER", "gemini")).lower()
+
+
 def _provider() -> dict:
-    name = str(getattr(config, "AI_PROVIDER", "gemini")).lower()
-    return _PROVIDERS.get(name, _PROVIDERS["gemini"])
+    return _PROVIDERS.get(_provider_name(), _PROVIDERS["gemini"])
+
+
+def _vertex_token() -> str:
+    """Mint a short-lived OAuth token from the service account JSON for Vertex AI."""
+    from google.oauth2 import service_account
+    from google.auth.transport.requests import Request as GAuthRequest
+
+    raw = getattr(config, "GOOGLE_SERVICE_ACCOUNT_JSON", None)
+    if not raw:
+        raise RuntimeError("AI_PROVIDER=vertex needs GOOGLE_SERVICE_ACCOUNT_JSON (the service account JSON).")
+    info = json.loads(raw)
+    creds = service_account.Credentials.from_service_account_info(
+        info, scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    creds.refresh(GAuthRequest())
+    return creds.token
 
 
 def _resolve_key(prov: dict) -> str:
+    if prov.get("vertex"):
+        return _vertex_token()
     for attr in prov["key_attrs"]:
         key = getattr(config, attr, None)
         if key:
@@ -79,7 +120,17 @@ def _resolve_key(prov: dict) -> str:
 
 
 def _base_url(prov: dict):
-    return getattr(config, "AI_BASE_URL", None) or prov["base_url"]
+    override = getattr(config, "AI_BASE_URL", None)
+    if override:
+        return override
+    if prov.get("vertex"):
+        project = getattr(config, "GCP_PROJECT", None)
+        location = getattr(config, "GCP_LOCATION", None) or "global"
+        if not project:
+            raise RuntimeError("AI_PROVIDER=vertex needs GCP_PROJECT.")
+        host = "aiplatform.googleapis.com" if location == "global" else f"{location}-aiplatform.googleapis.com"
+        return f"https://{host}/v1beta1/projects/{project}/locations/{location}/endpoints/openapi"
+    return prov["base_url"]
 
 
 def get_async_client() -> AsyncOpenAI:
@@ -142,6 +193,10 @@ def build_params(
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
+    # Vertex addresses Gemini models as "google/<model>".
+    if prov.get("vertex") and not model.startswith("google/"):
+        model = f"google/{model}"
+
     cap = int(getattr(config, "AI_MAX_COMPLETION_TOKENS", 8192))
     params: dict = {
         "model": model,
@@ -169,15 +224,20 @@ def _is_model_missing(err: Exception) -> bool:
     return "not found" in msg or "not supported" in msg or "model_not_found" in msg
 
 
+def _fallback_model() -> str:
+    return _FALLBACK_MODEL.get(_provider_name(), FALLBACK_MODEL)
+
+
 async def achat(params: dict):
     """Async chat completion with automatic fallback if the model name is invalid."""
     client = get_async_client()
     try:
         return await client.chat.completions.create(**params)
     except Exception as e:
-        if _is_model_missing(e) and params.get("model") != FALLBACK_MODEL:
-            logger.warning(f"⚠️ model {params.get('model')!r} unavailable → retrying with {FALLBACK_MODEL}")
-            return await client.chat.completions.create(**{**params, "model": FALLBACK_MODEL})
+        fb = _fallback_model()
+        if _is_model_missing(e) and params.get("model") != fb:
+            logger.warning(f"⚠️ model {params.get('model')!r} unavailable → retrying with {fb}")
+            return await client.chat.completions.create(**{**params, "model": fb})
         raise
 
 
@@ -187,9 +247,10 @@ def chat(params: dict):
     try:
         return client.chat.completions.create(**params)
     except Exception as e:
-        if _is_model_missing(e) and params.get("model") != FALLBACK_MODEL:
-            logger.warning(f"⚠️ model {params.get('model')!r} unavailable → retrying with {FALLBACK_MODEL}")
-            return client.chat.completions.create(**{**params, "model": FALLBACK_MODEL})
+        fb = _fallback_model()
+        if _is_model_missing(e) and params.get("model") != fb:
+            logger.warning(f"⚠️ model {params.get('model')!r} unavailable → retrying with {fb}")
+            return client.chat.completions.create(**{**params, "model": fb})
         raise
 
 
