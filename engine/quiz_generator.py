@@ -2,29 +2,12 @@ import asyncio
 import json
 import random
 import re
-import anthropic
 from core.config import config
+from core.groq_llm import get_async_client, build_params, parse_json_response
 from core.logger import setup_logger
 from schema.models import QuizTranslations, QuizQuestion, QuizOption
 
 logger = setup_logger("QuizGenerator")
-
-
-def _parse_ai_json(message) -> dict:
-    """Extract text blocks from an Anthropic message and parse JSON leniently."""
-    text = "".join(
-        b.text for b in message.content if getattr(b, "type", None) == "text"
-    ).strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        start, end = text.find("{"), text.rfind("}")
-        if start != -1 and end > start:
-            return json.loads(text[start:end + 1])
-        raise
 
 LANGUAGES = ["en", "ro", "es", "de", "fr"]
 VALID_IDS = {"a", "b", "c", "d"}
@@ -33,9 +16,7 @@ VALID_Q_IDS = {"q1", "q2", "q3", "q4"}
 
 class QuizGenerator:
     def __init__(self, model: str = config.AI_MODEL):
-        self.client = anthropic.AsyncAnthropic(
-            api_key=config.ANTHROPIC_API_KEY, timeout=600.0
-        )
+        self.client = get_async_client()
         self.model = model
         # Quizzes are mechanical (pick 4 plausible options, mark the right one) — no
         # thinking budget. Thinking bills as output, so this was pure waste here.
@@ -241,24 +222,22 @@ STRICT JSON — return ONLY this:
     # ══════════════════════════════════════════════════════════════════════
 
     async def _safe_call(self, prompt: str, context: str, retries: int = 2) -> dict | None:
-        """Call Claude (Haiku + extended thinking) with retry. Returns parsed JSON or None."""
+        """Call Groq (gpt-oss) with retry. Returns parsed JSON or None."""
         for attempt in range(retries + 1):
             try:
-                budget = self.thinking_budget
-                kwargs = {
-                    "model": self.model,
-                    "max_tokens": (budget + 8192) if budget else 8192,
-                    "system": (
+                params = build_params(
+                    model=self.model,
+                    system=(
                         "You are a quiz generator API for a history app. "
                         "Output ONLY valid JSON matching the exact schema requested. "
                         "No markdown, no preamble, no commentary. Just the JSON object."
                     ),
-                    "messages": [{"role": "user", "content": prompt}],
-                }
-                if budget:
-                    kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
-                message = await self.client.messages.create(**kwargs)
-                result = _parse_ai_json(message)
+                    prompt=prompt,
+                    max_tokens=8192,
+                    thinking_budget=self.thinking_budget,
+                )
+                message = await self.client.chat.completions.create(**params)
+                result = parse_json_response(message)
                 logger.info(f"✅ {context} — AI call OK (attempt {attempt + 1})")
                 return result
 

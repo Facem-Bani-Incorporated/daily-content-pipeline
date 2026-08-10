@@ -8,18 +8,17 @@ class Settings(BaseSettings):
     # Core
     WIKI_BASE_URL: str = "https://en.wikipedia.org/api/rest_v1"
     USER_AGENT: str = "DailyHistoryApp/2.0 (contact@yourdomain.com)"
-    AI_MODEL: str = "claude-haiku-4-5"
-    # Extended-thinking budget in tokens. Thinking tokens bill as OUTPUT ($5/MTok on
-    # Haiku 4.5), so this is the single biggest cost lever. Only discovery/ranking use
-    # it (they benefit from reasoning about date accuracy + significance). The high-volume
-    # creative/mechanical calls — narratives, quizzes, translations, titles, social —
-    # pass thinking_budget=0 explicitly and run WITHOUT thinking. Set to 0 to disable
-    # thinking everywhere.
+    AI_MODEL: str = "openai/gpt-oss-120b"
+    # Legacy "thinking budget" lever, kept for call-site compatibility. Groq has no
+    # extended-thinking billing; for reasoning models (e.g. gpt-oss) this maps onto
+    # Groq's `reasoning_effort` (budget > 0 -> "medium", 0 -> "low"). Only discovery/
+    # ranking pass a budget (they benefit from reasoning about date accuracy +
+    # significance); creative/mechanical calls pass 0 and run at "low" effort.
     AI_THINKING_BUDGET: int = 2000
 
     # API Keys
-    ANTHROPIC_API_KEY: str
-    GROQ_API_KEY: Optional[str] = None  # legacy — kept during transition, no longer used
+    GROQ_API_KEY: str
+    ANTHROPIC_API_KEY: Optional[str] = None  # legacy — kept during transition, no longer used
     CLOUDINARY_CLOUD_NAME: str
     CLOUDINARY_API_KEY: str
     CLOUDINARY_API_SECRET: str

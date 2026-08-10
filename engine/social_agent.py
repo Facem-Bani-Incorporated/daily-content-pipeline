@@ -17,29 +17,13 @@ import re
 import os
 import requests as sync_requests
 from urllib.parse import quote
-import anthropic
 from datetime import datetime
 from core.config import config
+from core.groq_llm import get_sync_client, build_params, parse_json_response
 from core.logger import setup_logger
 
 logger = setup_logger("SocialAgent")
 
-
-def _parse_ai_json(message) -> dict:
-    """Extract text blocks from an Anthropic message and parse JSON leniently."""
-    text = "".join(
-        b.text for b in message.content if getattr(b, "type", None) == "text"
-    ).strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        start, end = text.find("{"), text.rfind("}")
-        if start != -1 and end > start:
-            return json.loads(text[start:end + 1])
-        raise
 
 MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL", getattr(config, "MAKE_WEBHOOK_URL", None))
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK", getattr(config, "DISCORD_WEBHOOK", None))
@@ -47,7 +31,7 @@ DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK", getattr(config, "DISCORD_WEB
 
 class SocialMediaAgent:
     def __init__(self):
-        self.client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, timeout=600.0)
+        self.client = get_sync_client()
         self.model = getattr(config, "SOCIAL_AI_MODEL", None) or config.AI_MODEL
         # Social copy is a single daily call — no thinking budget (bills as output).
         self.thinking_budget = 0
@@ -362,26 +346,24 @@ Return ONLY valid JSON:
 }}"""
 
         try:
-            budget = self.thinking_budget
-            kwargs = {
-                "model": self.model,
-                "max_tokens": (budget + 3500) if budget else 3500,
-                "system": (
+            params = build_params(
+                model=self.model,
+                system=(
                     "You are a viral social media content creator for a history app. "
                     "Output ONLY valid JSON. No markdown, no code fences."
                 ),
-                "messages": [{"role": "user", "content": prompt}],
-            }
-            if budget:
-                kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
-            message = self.client.messages.create(**kwargs)
+                prompt=prompt,
+                max_tokens=3500,
+                thinking_budget=self.thinking_budget,
+            )
+            message = self.client.chat.completions.create(**params)
 
-            content = _parse_ai_json(message)
+            content = parse_json_response(message)
 
             usage = message.usage
             logger.info(
-                f"📊 Tokens: {usage.input_tokens} + {usage.output_tokens} "
-                f"= {usage.input_tokens + usage.output_tokens}"
+                f"📊 Tokens: {usage.prompt_tokens} + {usage.completion_tokens} "
+                f"= {usage.prompt_tokens + usage.completion_tokens}"
             )
 
             return content

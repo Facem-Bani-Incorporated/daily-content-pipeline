@@ -2,40 +2,17 @@ import asyncio
 import json
 import re
 from datetime import datetime
-import anthropic
 from core.config import config
+from core.groq_llm import get_async_client, build_params, parse_json_response
 from schema.models import EventCategory
 from core.logger import setup_logger
 
 logger = setup_logger("AIProcessor")
 
 
-def _parse_ai_json(message) -> dict:
-    """Pull the text blocks out of an Anthropic message and parse JSON leniently.
-
-    With extended thinking on, the response is [thinking_block, text_block]; we only
-    want the text. Strips markdown fences and, as a last resort, the outermost braces.
-    """
-    text = "".join(
-        b.text for b in message.content if getattr(b, "type", None) == "text"
-    ).strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text).strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        start, end = text.find("{"), text.rfind("}")
-        if start != -1 and end > start:
-            return json.loads(text[start:end + 1])
-        raise
-
-
 class AIProcessor:
     def __init__(self, model: str = config.AI_MODEL):
-        self.client = anthropic.AsyncAnthropic(
-            api_key=config.ANTHROPIC_API_KEY, timeout=600.0
-        )
+        self.client = get_async_client()
         self.model = model
         self.thinking_budget = config.AI_THINKING_BUDGET
         self.categories_list = [c.value for c in EventCategory]
@@ -1061,37 +1038,33 @@ Return JSON with language codes as keys:
         item["titles"] = titles
 
     # ══════════════════════════════════════════════════════════════
-    # SAFE AI CALL  (Claude Haiku + extended thinking)
+    # SAFE AI CALL  (Groq gpt-oss + reasoning_effort)
     # ══════════════════════════════════════════════════════════════
     async def _safe_ai_call(
         self,
         prompt: str,
         context: str,
         fallback: dict,
-        temperature: float = 0.4,   # kept for call-site compatibility; unused with thinking
+        temperature: float = 0.4,
         max_tokens: int = 4096,
         thinking_budget: int | None = None,
     ) -> dict:
         budget = self.thinking_budget if thinking_budget is None else thinking_budget
         try:
-            kwargs = {
-                "model": self.model,
-                # thinking tokens count toward output, so give the answer its own headroom
-                "max_tokens": (budget + max_tokens) if budget else max_tokens,
-                "system": (
+            params = build_params(
+                model=self.model,
+                system=(
                     "You are a strict History API. Output ONLY valid JSON. "
                     "No markdown, no code fences, no commentary."
                 ),
-                "messages": [{"role": "user", "content": prompt}],
-            }
-            if budget:
-                # Extended thinking requires temperature unset (Haiku pins it to 1).
-                kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
-            else:
-                # No thinking → temperature is free to use for creative variety.
-                kwargs["temperature"] = temperature
-            message = await self.client.messages.create(**kwargs)
-            return _parse_ai_json(message)
+                prompt=prompt,
+                max_tokens=max_tokens,
+                # Reasoning models ignore temperature when reasoning is on; harmless to pass.
+                temperature=temperature,
+                thinking_budget=budget,
+            )
+            message = await self.client.chat.completions.create(**params)
+            return parse_json_response(message)
         except json.JSONDecodeError as e:
             logger.error(f"🚨 JSON Parse Error ({context}): {e}")
             return fallback
