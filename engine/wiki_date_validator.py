@@ -5,6 +5,7 @@ from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Set
 from core.logger import setup_logger
+from core.onthisday import fetch_otd
 
 logger = setup_logger("WikiDateValidator")
 
@@ -45,56 +46,20 @@ class WikiDateValidator:
         if cache_key in self._otd_cache:
             return self._otd_cache[cache_key]
 
-        mm = f"{target_date.month:02d}"
-        dd = f"{target_date.day:02d}"
+        # Delegates to core.onthisday (retries transient failures, logs exception repr).
+        otd = await fetch_otd(target_date)
 
-        endpoints = ["events", "births", "deaths", "selected"]
         all_entries = []
-        headers = {"User-Agent": self.WIKI_USER_AGENT}
-
-        async with httpx.AsyncClient(headers=headers, timeout=15.0) as client:
-            tasks = [
-                client.get(
-                    f"https://en.wikipedia.org/api/rest_v1/feed/onthisday/{ep}/{mm}/{dd}"
-                )
-                for ep in endpoints
-            ]
-            responses = await asyncio.gather(*tasks, return_exceptions=True)
-
-            for ep, resp in zip(endpoints, responses):
-                if isinstance(resp, Exception):
-                    logger.warning(f"⚠️ OTD '{ep}' fetch failed: {resp}")
-                    continue
-                if resp.status_code != 200:
-                    continue
-                try:
-                    data = resp.json()
-                    entries = data.get(ep, [])
-                    for entry in entries:
-                        year = entry.get("year")
-                        text = entry.get("text", "")
-                        pages = entry.get("pages", [])
-                        slugs = []
-                        for p in pages:
-                            t = p.get("titles", {}).get("canonical") or p.get("title", "")
-                            if t:
-                                slugs.append(t.replace(" ", "_"))
-                        all_entries.append({
-                            "year": year, "text": text, "slugs": slugs,
-                        })
-                except Exception as e:
-                    logger.warning(f"⚠️ OTD '{ep}' parse error: {e}")
-
         slug_set: Set[str] = set()
-        for entry in all_entries:
-            for slug in entry["slugs"]:
-                slug_set.add(slug.lower())
+        for ep_entries in otd.values():
+            for e in ep_entries:
+                slug = e.get("slug") or ""
+                all_entries.append({"year": e.get("year"), "text": e.get("text", ""),
+                                    "slugs": [slug] if slug else []})
+                if slug:
+                    slug_set.add(slug.lower())
 
         result = {"entries": all_entries, "slug_set": slug_set}
-        logger.info(
-            f"📅 Wikipedia OTD for {mm}/{dd}: "
-            f"{len(all_entries)} entries, {len(slug_set)} slugs"
-        )
         self._otd_cache[cache_key] = result
         return result
 

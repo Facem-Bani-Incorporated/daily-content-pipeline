@@ -4,6 +4,7 @@ import re
 from datetime import datetime
 from core.config import config
 from core.llm import get_async_client, build_params, parse_json_response
+from core.onthisday import fetch_otd_reference
 from schema.models import EventCategory
 from core.logger import setup_logger
 
@@ -185,6 +186,21 @@ class AIProcessor:
             f"{listed}\n"
         )
 
+    @staticmethod
+    def _build_otd_block(otd_reference: str) -> str:
+        """Ground the model in Wikipedia's curated, verified On-This-Day list so it picks
+        real, correctly-dated events instead of hallucinating. Empty when OTD is
+        unavailable — discovery then falls back to pure recall."""
+        if not otd_reference:
+            return ""
+        return (
+            "\nWIKIPEDIA ON-THIS-DAY — curated and VERIFIED for this exact day. These are "
+            "real events with correct dates and exact article titles. Treat this as your "
+            "PRIMARY source: prefer these, and copy the slug (Title) exactly. You MAY add "
+            "other events only if you are certain of the exact date; NEVER invent.\n"
+            f"{otd_reference}\n"
+        )
+
     # ══════════════════════════════════════════════════════════════
     # PASS 1 — Discovery
     # ══════════════════════════════════════════════════════════════
@@ -192,6 +208,7 @@ class AIProcessor:
         date_str = self._get_target_date_str(target_date)
         month, day = self._get_month_day(target_date)
         avoid_block = self._build_avoid_block(exclude_slugs)
+        otd_block = self._build_otd_block(await fetch_otd_reference(target_date))
 
         prompt = f"""
 You are a meticulous Senior Historian and Fact-Checker.
@@ -212,7 +229,7 @@ CRITICAL RULES:
    deaths, cultural or sporting curiosities). A thin or empty list is a failure:
    always come back with a rich set of real events. Lesser-known is welcome;
    invented or misdated is not.
-{avoid_block}
+{otd_block}{avoid_block}
 STRICT JSON SCHEMA:
 {{
   "events": [
@@ -263,6 +280,7 @@ ONLY HIGH confidence.
         month, day = self._get_month_day(target_date)
         pro_cats = ["personalities", "media", "sport"]
         avoid_block = self._build_avoid_block(exclude_slugs)
+        otd_block = self._build_otd_block(await fetch_otd_reference(target_date))
 
         prompt = f"""
 You are a Senior Pop-Culture & Entertainment Historian.
@@ -280,7 +298,7 @@ HARD RULES:
    is represented. Never leave a category empty. Never invent; accuracy over fame.
 4. Aim for 6+ per category, 25-40 total. More is better.
 5. Only HIGH confidence.
-{avoid_block}
+{otd_block}{avoid_block}
 STRICT JSON SCHEMA:
 {{
   "events": [
