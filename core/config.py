@@ -38,9 +38,10 @@ class Settings(BaseSettings):
     # hallucinates and the Wikipedia validator rejects everything. Creative calls skip
     # reasoning entirely. Ignored by providers/models that don't support it (e.g. gpt-4o-mini).
     AI_REASONING_EFFORT: str = "medium"
-    # Hard cap on max output tokens per request. Gemini's limits are generous so 8192 is
-    # fine; lower it if you ever run on a tight tokens-per-minute tier (e.g. Groq free).
-    AI_MAX_COMPLETION_TOKENS: int = 8192
+    # Hard cap on max output tokens per request. On Gemini/Vertex reasoning tokens count
+    # against this, so discovery (medium reasoning + a long list) needs generous room —
+    # Vertex limits are high. Lower it only for a tight tokens-per-minute tier (Groq free).
+    AI_MAX_COMPLETION_TOKENS: int = 16384
 
     # API Keys — set the one matching AI_PROVIDER
     GEMINI_API_KEY: Optional[str] = None

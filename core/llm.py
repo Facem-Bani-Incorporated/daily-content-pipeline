@@ -78,6 +78,11 @@ _FALLBACK_MODEL = {
 # The SDK retries 429s automatically, honouring the provider's retry-after header.
 _MAX_RETRIES = 6
 
+# Minimum max_tokens for a medium/high reasoning call: on Gemini/Vertex the thinking
+# tokens come out of max_tokens, so discovery (long list + reasoning) needs headroom or
+# it truncates to empty/invalid JSON. Bounded by AI_MAX_COMPLETION_TOKENS.
+_REASONING_TOKEN_FLOOR = 12288
+
 _async_client = None
 _sync_client = None
 
@@ -197,7 +202,15 @@ def build_params(
     if prov.get("vertex") and not model.startswith("google/"):
         model = f"google/{model}"
 
-    cap = int(getattr(config, "AI_MAX_COMPLETION_TOKENS", 8192))
+    effort = _reasoning_effort(prov, thinking_budget)
+
+    # On Gemini/Vertex, thinking tokens are drawn from max_tokens, so a reasoning call
+    # with a small budget truncates (empty/invalid output). Give medium/high effort a
+    # floor so the answer survives the thinking. Bounded by the hard cap below.
+    if effort in ("medium", "high"):
+        max_tokens = max(max_tokens, _REASONING_TOKEN_FLOOR)
+
+    cap = int(getattr(config, "AI_MAX_COMPLETION_TOKENS", 16384))
     params: dict = {
         "model": model,
         "messages": messages,
@@ -206,7 +219,6 @@ def build_params(
     if temperature is not None:
         params["temperature"] = temperature
 
-    effort = _reasoning_effort(prov, thinking_budget)
     if effort is not None:
         params["reasoning_effort"] = effort
 
