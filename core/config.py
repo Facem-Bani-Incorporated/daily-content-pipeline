@@ -62,7 +62,14 @@ class Settings(BaseSettings):
         if not v:
             return DEFAULT_MODEL
         low = str(v).lower()
-        if low.startswith("claude") or low.startswith("openai/gpt-oss") or "haiku" in low:
+        # Foreign providers' models, or Gemini models that Google retired for new users.
+        dead = ("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0", "gemini-1.5")
+        if (
+            low.startswith("claude")
+            or low.startswith("openai/gpt-oss")
+            or "haiku" in low
+            or low in dead
+        ):
             return DEFAULT_MODEL
         return v
 
