@@ -59,11 +59,19 @@ def get_sync_client() -> Groq:
     return _sync_client
 
 
-def _reasoning_effort() -> str:
-    """Global reasoning effort for gpt-oss. Lower = fewer tokens (kinder to the TPM
-    limit) and less truncation risk; gpt-oss-120b is strong even at 'low'."""
-    effort = str(getattr(config, "AI_REASONING_EFFORT", "low")).lower()
-    return effort if effort in _REASONING_HEADROOM else "low"
+def _reasoning_effort(thinking_budget: int) -> str:
+    """Per-call reasoning effort for gpt-oss.
+
+    Discovery/ranking (the calls that pass a budget > 0) MUST reason about which
+    events genuinely fall on a given date — at "low" the model just lists famous
+    names with fabricated dates and the Wikipedia validator rejects them all, so
+    they use AI_REASONING_EFFORT (default "high"). Creative/mechanical calls
+    (budget == 0) get nothing from reasoning tokens and stay at "low".
+    """
+    if not thinking_budget or thinking_budget <= 0:
+        return "low"
+    effort = str(getattr(config, "AI_REASONING_EFFORT", "high")).lower()
+    return effort if effort in _REASONING_HEADROOM else "high"
 
 
 def build_params(
@@ -88,7 +96,7 @@ def build_params(
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
-    effort = _reasoning_effort()
+    effort = _reasoning_effort(thinking_budget)
     params: dict = {
         "model": model,
         "messages": messages,
