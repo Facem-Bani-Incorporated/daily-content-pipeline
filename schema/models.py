@@ -67,6 +67,36 @@ class QuizTranslations(BaseModel):
     fr: List[QuizQuestion] = []
 
 
+class DeepDiveChapter(BaseModel):
+    title: str
+    body: str
+
+
+class DeepDive(BaseModel):
+    """The long-form PRO narrative for one event, in one language.
+
+    Structured rather than a single text blob for two reasons: the app renders the
+    chapters, the timeline and the sources as distinct UI, and the *teaser* plus the
+    chapter titles can be shipped to free users as the paywall pitch without the
+    body text ever leaving the server.
+    """
+    chapters: List[DeepDiveChapter] = []
+    timeline: List[str] = []      # "14:32 — the first signal reaches Lisbon"
+    misconception: str = ""       # "what everyone gets wrong about this day"
+    aftermath: List[str] = []     # consequences at +10y / +50y / +100y
+    sources: List[str] = []       # "Author, Title (Year)" — never invented URLs
+    teaser: str = ""              # opening ~70 words; safe to send to free users
+    word_count: int = 0
+
+
+class DeepDiveTranslations(BaseModel):
+    en: Optional[DeepDive] = None
+    ro: Optional[DeepDive] = None
+    es: Optional[DeepDive] = None
+    de: Optional[DeepDive] = None
+    fr: Optional[DeepDive] = None
+
+
 class EventDetail(BaseModel):
     category: EventCategory
     year: int
@@ -74,6 +104,10 @@ class EventDetail(BaseModel):
     source_url: str
     title_translations: Translations
     narrative_translations: Translations
+    # Long-form PRO narrative. None when the event predates the feature or the
+    # generator failed — the app then shows no teaser at all rather than promising
+    # content that does not exist.
+    deep_dive: Optional[DeepDiveTranslations] = None
     # Per-language push-notification hook (TikTok-style). Two parallel Translations so the
     # Java backend can reuse its existing translations table for each.
     notification_title_translations: Translations = Field(default_factory=_empty_translations)

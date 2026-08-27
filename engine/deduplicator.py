@@ -225,7 +225,8 @@ class EventDeduplicator:
             cur.execute(
                 """
                 SELECT source_url, event_date, category, impact_score, page_views_30d,
-                       title_translations, narrative_translations, is_pro, location, gallery
+                       title_translations, narrative_translations, is_pro, location, gallery,
+                       deep_dive
                 FROM events
                 WHERE EXTRACT(MONTH FROM event_date) = %s
                   AND EXTRACT(DAY FROM event_date) = %s
@@ -265,6 +266,63 @@ class EventDeduplicator:
         except Exception as e:
             logger.warning(f"⚠️ Could not load existing events for {target_date}: {e}")
             return []
+
+    # ══════════════════════════════════════════════════════════════
+    # DEEP DIVE BACKFILL
+    # The archive predates the long read. These two methods let the backfill job
+    # fill it in one event at a time, writing ONLY the two deep-dive columns —
+    # re-sending a DailyPayload would clear and regenerate the whole day.
+    # ══════════════════════════════════════════════════════════════
+    def load_events_missing_deep_dive(self, from_date, to_date, limit: int = 20) -> list:
+        """Published events in a date range that have no long read yet, best first."""
+        try:
+            conn = self._get_connection()
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute(
+                """
+                SELECT e.id, e.source_url, e.event_date, e.location, e.is_pro,
+                       t.en AS title_en,
+                       n.en AS narrative_en
+                FROM events e
+                JOIN translations t ON t.id = e.title_translations_id
+                JOIN translations n ON n.id = e.narrative_translations_id
+                WHERE e.event_date >= %s AND e.event_date <= %s
+                  AND (e.deep_dive IS NULL OR e.deep_dive = '')
+                  AND n.en <> ''
+                ORDER BY e.impact_score DESC
+                LIMIT %s
+                """,
+                (from_date, to_date, limit),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+            cur.close()
+            conn.close()
+            logger.info(f"📋 {len(rows)} events need a long read between {from_date} and {to_date}")
+            return rows
+        except Exception as e:
+            logger.error(f"🚨 Could not load events missing deep dive: {e}")
+            return []
+
+    def write_deep_dive(self, event_id: int, deep_dive: str, teaser: str) -> bool:
+        """Write the two deep-dive columns for one event. Touches nothing else."""
+        try:
+            conn = self._get_connection()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE events
+                SET deep_dive = %s, deep_dive_teaser = %s
+                WHERE id = %s
+                """,
+                (deep_dive, teaser, event_id),
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+            return True
+        except Exception as e:
+            logger.error(f"🚨 Could not write deep dive for event {event_id}: {e}")
+            return False
 
     def filter_duplicates(self, events: list, tier: str = "FREE") -> list:
         if not events:

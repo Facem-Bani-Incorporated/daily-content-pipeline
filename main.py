@@ -11,12 +11,21 @@ from core.logger import setup_logger
 from core.config import config
 from engine.scraper import WikiScraper
 from engine.processor import AIProcessor
+from engine.deep_dive import DeepDiveGenerator
 from engine.quiz_generator import QuizGenerator
 from engine.ranker import ScoringEngine
 from engine.social_agent import SocialMediaAgent
 from engine.deduplicator import EventDeduplicator
 from engine.wiki_date_validator import WikiDateValidator
-from schema.models import DailyPayload, EventDetail, EventCategory, Translations
+from schema.models import (
+    DailyPayload,
+    EventDetail,
+    EventCategory,
+    Translations,
+    DeepDive,
+    DeepDiveChapter,
+    DeepDiveTranslations,
+)
 
 logger = setup_logger("MainPipeline")
 
@@ -95,7 +104,102 @@ def _db_row_to_event_detail(row: dict) -> EventDetail:
         quiz=None,  # quiz preserved in DB; not re-sent to avoid overwrite
         is_pro=bool(row.get("is_pro", False)),
         location=row.get("location"),
+        # Carry the stored long read forward. The Java upsert clears and repopulates the
+        # whole day, so a filler event sent without its deep dive would delete one that
+        # was already generated and paid for.
+        deep_dive=_deep_dive_from_db(row.get("deep_dive")),
     )
+
+
+def _deep_dive_from_db(raw) -> DeepDiveTranslations | None:
+    """Rebuild DeepDiveTranslations from the `deep_dive` text column.
+
+    Anything malformed yields None rather than raising: a filler event without a long
+    read is a small loss, a crashed daily run is a large one.
+    """
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(data, dict):
+            return None
+    except Exception:
+        logger.warning("⚠️ Filler event has unparseable deep_dive — dropping it")
+        return None
+
+    langs = {}
+    for lang in ("en", "ro", "es", "de", "fr"):
+        entry = data.get(lang)
+        if not isinstance(entry, dict) or not entry.get("chapters"):
+            continue
+        try:
+            langs[lang] = DeepDive(
+                chapters=[
+                    DeepDiveChapter(
+                        title=str(c.get("title") or ""),
+                        body=str(c.get("body") or ""),
+                    )
+                    for c in entry.get("chapters", [])
+                    if isinstance(c, dict)
+                ],
+                timeline=[str(x) for x in entry.get("timeline", [])],
+                misconception=str(entry.get("misconception") or ""),
+                aftermath=[str(x) for x in entry.get("aftermath", [])],
+                sources=[str(x) for x in entry.get("sources", [])],
+                teaser=str(entry.get("teaser") or ""),
+                word_count=int(entry.get("word_count") or 0),
+            )
+        except Exception:
+            continue
+
+    return DeepDiveTranslations(**langs) if langs else None
+
+
+def _serialize_deep_dive(deep_dive) -> str | None:
+    """Full long read as a JSON string for the `deep_dive` column — PRO users only.
+
+    A string rather than a jsonb column: the database never queries inside this blob,
+    and text avoids every Hibernate/driver JSON-typing question.
+    """
+    if deep_dive is None:
+        return None
+    payload = {}
+    for lang in ("en", "ro", "es", "de", "fr"):
+        dd = getattr(deep_dive, lang, None)
+        if dd is None or not dd.chapters:
+            continue
+        payload[lang] = {
+            "chapters": [{"title": c.title, "body": c.body} for c in dd.chapters],
+            "timeline": dd.timeline,
+            "misconception": dd.misconception,
+            "aftermath": dd.aftermath,
+            "sources": dd.sources,
+            "teaser": dd.teaser,
+            "word_count": dd.word_count,
+        }
+    return json.dumps(payload, ensure_ascii=False) if payload else None
+
+
+def _serialize_deep_dive_teaser(deep_dive) -> str | None:
+    """The part every user receives: opening words, chapter titles, and the numbers.
+
+    Kept in its own column so the free endpoint can ship the pitch without the body
+    text ever being loaded — the chapter titles ARE the pitch, so they are not secret.
+    """
+    if deep_dive is None:
+        return None
+    payload = {}
+    for lang in ("en", "ro", "es", "de", "fr"):
+        dd = getattr(deep_dive, lang, None)
+        if dd is None or not dd.chapters:
+            continue
+        payload[lang] = {
+            "teaser": dd.teaser,
+            "chapters": [c.title for c in dd.chapters],
+            "wordCount": dd.word_count,
+            "sourceCount": len(dd.sources),
+        }
+    return json.dumps(payload, ensure_ascii=False) if payload else None
 
 
 def _serialize_quiz(quiz) -> dict | None:
@@ -163,6 +267,10 @@ async def send_to_java(payload: DailyPayload):
             "isPro": bool(ev.is_pro),
             "location": ev.location,
             "quiz": _serialize_quiz(ev.quiz),
+            # Long read. `deepDive` is served only to PRO users; `deepDiveTeaser`
+            # carries the chapter titles and word count and goes to everyone.
+            "deepDive": _serialize_deep_dive(ev.deep_dive),
+            "deepDiveTeaser": _serialize_deep_dive_teaser(ev.deep_dive),
         }
         events_final.append(ev_dict)
 
@@ -189,13 +297,16 @@ async def send_to_java(payload: DailyPayload):
         "Content-Type": "application/json",
     }
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    # The long read multiplies the payload by roughly five (9 events x 5 languages x
+    # ~2000 words), so the old 30s ceiling is no longer comfortable on a cold backend.
+    async with httpx.AsyncClient(timeout=120.0) as client:
         try:
             logger.info(f"📤 Sending to Java: {target_url}")
             logger.info(
                 f"📦 Payload: {len(events_final)} events "
                 f"({sum(1 for e in events_final if e['isPro'])} PRO, "
-                f"{sum(1 for e in events_final if not e['isPro'])} FREE)"
+                f"{sum(1 for e in events_final if not e['isPro'])} FREE, "
+                f"{sum(1 for e in events_final if e['deepDive'])} with long read)"
             )
             response = await client.post(target_url, content=body_bytes, headers=headers)
             if response.status_code in [200, 201]:
@@ -366,8 +477,13 @@ async def run_free_pipeline(
             logger.info("✍️ FREE REFRESH — Generating narratives for new events...")
             narratives_map = await processor.generate_secondary_narratives(high_quality, today)
             quizzes = await quiz_gen.generate_quizzes(high_quality, narratives_map)
+            logger.info("📚 FREE REFRESH — Generating long reads...")
+            deep_dives = await DeepDiveGenerator(processor).generate_deep_dives(
+                high_quality, narratives_map, today
+            )
             new_details = await _build_event_details(
-                high_quality, narratives_map, quizzes, today, scraper, is_pro=False
+                high_quality, narratives_map, quizzes, today, scraper, is_pro=False,
+                deep_dives_map=deep_dives,
             )
 
         final_events_list = new_details + filler_details
@@ -402,8 +518,14 @@ async def run_free_pipeline(
     logger.info("🧠 FREE — Generating quizzes...")
     quizzes = await quiz_gen.generate_quizzes(selected, narratives_map)
 
+    logger.info("📚 FREE — Generating long reads...")
+    deep_dives = await DeepDiveGenerator(processor).generate_deep_dives(
+        selected, narratives_map, today
+    )
+
     final_events_list = await _build_event_details(
-        selected, narratives_map, quizzes, today, scraper, is_pro=False
+        selected, narratives_map, quizzes, today, scraper, is_pro=False,
+        deep_dives_map=deep_dives,
     )
 
     return final_events_list, {
@@ -545,8 +667,13 @@ async def run_pro_pipeline(
             logger.info("✍️ PRO REFRESH — Generating narratives for new events...")
             narratives_map = await processor.generate_secondary_narratives(high_quality, today)
             quizzes = await quiz_gen.generate_quizzes(high_quality, narratives_map)
+            logger.info("📚 PRO REFRESH — Generating long reads...")
+            deep_dives = await DeepDiveGenerator(processor).generate_deep_dives(
+                high_quality, narratives_map, today
+            )
             new_details = await _build_event_details(
-                high_quality, narratives_map, quizzes, today, scraper, is_pro=True
+                high_quality, narratives_map, quizzes, today, scraper, is_pro=True,
+                deep_dives_map=deep_dives,
             )
 
         final_pro_list = new_details + filler_details
@@ -576,8 +703,14 @@ async def run_pro_pipeline(
     logger.info("🧠 PRO — Generating quizzes...")
     quizzes = await quiz_gen.generate_quizzes(pro_selected, narratives_map)
 
+    logger.info("📚 PRO — Generating long reads...")
+    deep_dives = await DeepDiveGenerator(processor).generate_deep_dives(
+        pro_selected, narratives_map, today
+    )
+
     final_pro_list = await _build_event_details(
-        pro_selected, narratives_map, quizzes, today, scraper, is_pro=True
+        pro_selected, narratives_map, quizzes, today, scraper, is_pro=True,
+        deep_dives_map=deep_dives,
     )
 
     return final_pro_list, {
@@ -599,6 +732,7 @@ async def _build_event_details(
     today: datetime,
     scraper: WikiScraper,
     is_pro: bool,
+    deep_dives_map: dict | None = None,
 ) -> list:
     tier_tag = "pro" if is_pro else "free"
     final_list = []
@@ -678,10 +812,36 @@ async def _build_event_details(
                 quiz=event_quiz,
                 is_pro=is_pro,
                 location=item.get("location"),
+                deep_dive=_deep_dive_for_index(deep_dives_map, idx),
             )
         )
 
     return final_list
+
+
+def _deep_dive_for_index(deep_dives_map: dict | None, idx: int) -> DeepDiveTranslations | None:
+    """Pick this event's long read out of the generator's output.
+
+    Events whose generation failed are absent from the map, which is deliberate: the
+    app shows no teaser at all rather than promising chapters that do not exist.
+    """
+    if not deep_dives_map:
+        return None
+    entry = deep_dives_map.get(f"EVENT_{idx}")
+    if not entry:
+        return None
+    return DeepDiveTranslations(**{
+        lang: DeepDive(
+            chapters=[DeepDiveChapter(**c) for c in payload["chapters"]],
+            timeline=payload["timeline"],
+            misconception=payload["misconception"],
+            aftermath=payload["aftermath"],
+            sources=payload["sources"],
+            teaser=payload["teaser"],
+            word_count=payload["word_count"],
+        )
+        for lang, payload in entry.items()
+    })
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -805,6 +965,73 @@ async def run_pipeline_for_date(
 
 
 # ══════════════════════════════════════════════════════════════════
+# BACKFILL — long reads for the archive
+# The archive predates the feature. This runs as its own job (never inside the
+# daily cron) and writes only the two deep-dive columns, so a partial or failed
+# backfill can never damage published content.
+#
+#   python main.py --backfill-deepdive --from 2026-01-01 --to 2026-08-26 --limit 20
+# ══════════════════════════════════════════════════════════════════
+async def backfill_deep_dives(from_date: str, to_date: str, limit: int) -> None:
+    from datetime import date as _date
+
+    deduper = EventDeduplicator()
+    processor = AIProcessor()
+    generator = DeepDiveGenerator(processor)
+
+    rows = deduper.load_events_missing_deep_dive(
+        _date.fromisoformat(from_date), _date.fromisoformat(to_date), limit
+    )
+    if not rows:
+        logger.info("✅ Nothing to backfill in that range.")
+        return
+
+    ok = 0
+    for row in rows:
+        slug = str(row.get("source_url") or "").split("/wiki/")[-1]
+        event_date = row.get("event_date")
+        title = str(row.get("title_en") or "")
+        narrative = str(row.get("narrative_en") or "")
+
+        # `_generate_english` expects the discovery-shaped dict. The stored title plus
+        # the published narrative is richer context than the original one-line text was.
+        item = {
+            "year": getattr(event_date, "year", 0),
+            "text": f"{title}. {narrative[:600]}",
+            "slug": slug,
+            "location": row.get("location"),
+        }
+
+        logger.info(f"📚 Backfilling [{row['id']}] {title[:60]}")
+        result = await generator.generate_deep_dives(
+            [item], {"EVENT_0": {"en": narrative}}, datetime.combine(event_date, datetime.min.time())
+        )
+        entry = result.get("EVENT_0")
+        if not entry:
+            logger.warning(f"⚠️ Backfill failed for event {row['id']} — leaving it empty")
+            continue
+
+        deep_dive = _deep_dive_for_index(result, 0)
+        if deduper.write_deep_dive(
+            row["id"],
+            _serialize_deep_dive(deep_dive),
+            _serialize_deep_dive_teaser(deep_dive),
+        ):
+            ok += 1
+            logger.info(f"✅ Backfilled event {row['id']}")
+
+        # The daily run shares this provider quota. Pace the backfill so a large
+        # range can never starve the job that actually has a deadline.
+        await asyncio.sleep(3)
+
+    logger.info(f"🏁 Backfill complete: {ok}/{len(rows)} events now have a long read")
+    logger.info(
+        "ℹ️ Backend caches daily content for 24h — backfilled days may serve the old "
+        "payload until the entry expires."
+    )
+
+
+# ══════════════════════════════════════════════════════════════════
 # MAIN
 # Auto-detects which days need processing:
 #   - If today AND tomorrow already have events → only process day+2
@@ -882,5 +1109,26 @@ async def main():
     logger.info("\n✅ Pipeline complete.")
 
 
+def _cli_arg(name: str, default: str | None = None) -> str | None:
+    """Read `--name value` from argv. Kept tiny on purpose — the pipeline is a cron
+    job configured by env vars; the backfill is the only thing with real arguments."""
+    import sys
+    if name in sys.argv:
+        idx = sys.argv.index(name)
+        if idx + 1 < len(sys.argv):
+            return sys.argv[idx + 1]
+    return default
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    import sys
+
+    if "--backfill-deepdive" in sys.argv:
+        _from = _cli_arg("--from")
+        _to = _cli_arg("--to")
+        if not _from or not _to:
+            logger.error("🚨 --backfill-deepdive needs --from YYYY-MM-DD --to YYYY-MM-DD")
+            sys.exit(1)
+        asyncio.run(backfill_deep_dives(_from, _to, int(_cli_arg("--limit", "20"))))
+    else:
+        asyncio.run(main())
