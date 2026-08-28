@@ -66,8 +66,14 @@ TARGET_RARE = 2
 # floor and its target is a smaller game, not a broken one.
 MAX_DEPTH = 3        # decisions per run; the app reads "Decision 2 of 3" off this
 MIN_CHOICES = 2      # a node offering one option is a corridor, not a decision
-MIN_DECISIONS = 7    # 1 + 2 + 4, the fully-narrow tree
+MIN_DEPTH = 2        # two decisions is still a game; one is a page with buttons
 MIN_ENDINGS = 8      # below this the collection grid is not worth showing
+
+
+def min_decisions(depth: int) -> int:
+    """The fully-narrow tree at this depth: 1 + 2 + 4 + … Anything smaller has a branch
+    missing rather than a branch that is merely narrow."""
+    return sum(MIN_CHOICES ** i for i in range(depth))
 MIN_ACTORS = 3
 
 # How many events beyond `want` the generator may fall through to before giving up. The
@@ -231,7 +237,7 @@ class ParallelGenerator:
         built = await self._generate_trunk(idx, item, date_str, context)
         if not built:
             return None
-        trunk, slots = built
+        trunk, slots, depth = built
 
         endings = await self._generate_endings(idx, item, trunk, slots)
         if not endings:
@@ -244,7 +250,7 @@ class ParallelGenerator:
         endings_by_id = {
             e["id"]: e for e in endings if not self._node_broken(e, ending=True)
         }
-        nodes, _ = self._prune(trunk["nodes"], trunk["root"], endings_by_id, actor_ids)
+        nodes, _ = self._prune(trunk["nodes"], trunk["root"], endings_by_id, actor_ids, depth)
         if not nodes:
             logger.warning(f"⚠️ Parallel {idx} — nothing survived once the endings landed")
             return None
@@ -281,23 +287,34 @@ class ParallelGenerator:
                 f"Parallel {idx}:trunk ({stance}, attempt {attempt})",
                 {"nodes": []},
                 temperature=0.85,   # this is fiction built on fact; it needs room
-                max_tokens=16384,
+                # Thirteen nodes with facts, thirty choices with outcomes and roughly
+                # seventy-five quotes does not fit in 16k, and on Vertex the thinking
+                # budget comes out of the same allowance. Being clipped here is the
+                # worst possible spend: full price, unusable answer.
+                max_tokens=32768,
                 thinking_budget=self.thinking_budget,
             )
             payload = self._normalize(res)
             raw = len(payload["nodes"])
             actor_ids = {a["id"] for a in payload["actors"]}
             root = payload["root"] if payload["root"] in {n["id"] for n in payload["nodes"]} else "n0"
-            nodes, slots = self._prune(payload["nodes"], root, None, actor_ids)
-            payload = {**payload, "root": root, "nodes": nodes}
 
-            ok, why = self._validate_trunk(payload, slots)
-            if ok:
-                logger.info(
-                    f"🌳 Parallel {idx}:trunk — {len(nodes)}/{TARGET_DECISIONS} decisions, "
-                    f"{len(slots)} ending slots (kept {len(nodes)} of {raw} returned, {stance})"
-                )
-                return payload, slots
+            # Full depth first; one shallower if nothing survives. A response that only
+            # ever reached the second level still makes a two-decision game, and two
+            # decisions beat the blank screen this feature has shown since launch.
+            why = "no nodes"
+            for depth in range(MAX_DEPTH, MIN_DEPTH - 1, -1):
+                nodes, slots = self._prune(payload["nodes"], root, None, actor_ids, depth)
+                cand = {**payload, "root": root, "nodes": nodes}
+                ok, why = self._validate_trunk(cand, slots, depth)
+                if ok:
+                    short = "" if depth == MAX_DEPTH else f" — SHALLOW, {depth} decisions"
+                    logger.info(
+                        f"🌳 Parallel {idx}:trunk — {len(nodes)}/{TARGET_DECISIONS} decisions, "
+                        f"{len(slots)} ending slots "
+                        f"(kept {len(nodes)} of {raw} returned, {stance}{short})"
+                    )
+                    return cand, slots, depth
             logger.warning(f"⚠️ Parallel {idx}:trunk {stance}: {why} (model returned {raw} nodes)")
         return None
 
@@ -313,7 +330,7 @@ class ParallelGenerator:
                 f"Parallel {idx}:endings (attempt {attempt})",
                 {"nodes": []},
                 temperature=0.85,
-                max_tokens=16384,
+                max_tokens=32768,
                 thinking_budget=self.thinking_budget,
             )
             nodes = self._normalize({"nodes": res.get("nodes") if isinstance(res, dict) else []})["nodes"]
@@ -636,7 +653,7 @@ Return JSON with "pivot_title", "premise", "actors" and "nodes" as above, in {la
             f"Parallel {idx}:{lang}",
             {"nodes": []},
             temperature=0.3,
-            max_tokens=16384,
+            max_tokens=32768,
             thinking_budget=0,
         )
 
@@ -897,7 +914,8 @@ Return JSON with "pivot_title", "premise", "actors" and "nodes" as above, in {la
             return "no verdict or epitaph"
         return None
 
-    def _prune(self, nodes: list, root: str, endings_by_id: dict | None, actor_ids: set):
+    def _prune(self, nodes: list, root: str, endings_by_id: dict | None, actor_ids: set,
+               depth: int = MAX_DEPTH):
         """The largest uniform-depth playable tree inside `nodes`.
 
         Walks down from the root keeping only choices that lead somewhere real, and drops
@@ -906,6 +924,10 @@ Return JSON with "pivot_title", "premise", "actors" and "nodes" as above, in {la
 
         `endings_by_id` is None during pass one, when the endings do not exist yet and any
         unknown target at the bottom level is simply an ending slot to be filled later.
+
+        `depth` is how many decisions a run must take. Callers retry one shallower when
+        nothing survives: two decisions and eight endings is a smaller game, but it is a
+        game, and the app reads the depth off the tree rather than assuming three.
 
         Returns (kept nodes, ending slot ids).
         """
@@ -922,7 +944,7 @@ Return JSON with "pivot_title", "premise", "actors" and "nodes" as above, in {la
             if node is None or self._node_broken(node, ending=False):
                 return None
 
-            if level == MAX_DEPTH:
+            if level == depth:
                 # Bottom decision node: its choices open onto endings.
                 good = []
                 for c in node["choices"]:
@@ -965,7 +987,7 @@ Return JSON with "pivot_title", "premise", "actors" and "nodes" as above, in {la
                 continue
             kept[nid] = node
             for c in node["choices"]:
-                if level == MAX_DEPTH:
+                if level == depth:
                     slots.add(c["next"])
                 else:
                     stack.append((c["next"], level + 1))
@@ -986,7 +1008,7 @@ Return JSON with "pivot_title", "premise", "actors" and "nodes" as above, in {la
     # ══════════════════════════════════════════════════════════════════
     # VALIDATE
 
-    def _validate_trunk(self, p: dict, slots: set) -> tuple:
+    def _validate_trunk(self, p: dict, slots: set, depth: int = MAX_DEPTH) -> tuple:
         """What is left after pruning still has to be a game worth opening."""
         if not p["premise"] or not p["pivot_title"]:
             return False, "missing premise or pivot title"
@@ -994,8 +1016,10 @@ Return JSON with "pivot_title", "premise", "actors" and "nodes" as above, in {la
             return False, str(len(p["actors"])) + " actors, need " + str(MIN_ACTORS)
         if any(not a["name"] for a in p["actors"]):
             return False, "an actor has no name"
-        if len(p["nodes"]) < MIN_DECISIONS:
-            return False, str(len(p["nodes"])) + " decision nodes survived, need " + str(MIN_DECISIONS)
+        floor = min_decisions(depth)
+        if len(p["nodes"]) < floor:
+            return False, (str(len(p["nodes"])) + " decision nodes survived at depth "
+                           + str(depth) + ", need " + str(floor))
         if len(slots) < MIN_ENDINGS:
             return False, str(len(slots)) + " ending slots, need " + str(MIN_ENDINGS)
         return True, "OK"

@@ -41,7 +41,14 @@ class Settings(BaseSettings):
     # Hard cap on max output tokens per request. On Gemini/Vertex reasoning tokens count
     # against this, so discovery (medium reasoning + a long list) needs generous room —
     # Vertex limits are high. Lower it only for a tight tokens-per-minute tier (Groq free).
-    AI_MAX_COMPLETION_TOKENS: int = 16384
+    #
+    # Raised from 16384 after the parallel-universe generator spent a week being silently
+    # truncated at the old ceiling: a cut-off response is repaired into valid JSON, so it
+    # looks like a short answer rather than a clipped one, and every tree was rejected as
+    # too small. gemini-2.5-flash allows 65535 out; this leaves headroom without inviting
+    # runaway generations. Callers still pass their own max_tokens — this only stops the
+    # ones that legitimately need room from being clipped.
+    AI_MAX_COMPLETION_TOKENS: int = 40960
 
     # API Keys — set the one matching AI_PROVIDER
     GEMINI_API_KEY: Optional[str] = None

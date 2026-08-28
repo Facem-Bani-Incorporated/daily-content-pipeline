@@ -326,7 +326,20 @@ def parse_json_response(resp) -> dict:
     Strips markdown fences and, as a last resort, the outermost braces — same
     tolerance the old Anthropic `_parse_ai_json` had.
     """
-    text = (resp.choices[0].message.content or "").strip()
+    # A response cut off at the token ceiling still arrives as a well-formed object once
+    # json_repair has closed the dangling braces, so nothing downstream can tell the
+    # difference between "the model wrote a short list" and "we stopped paying halfway
+    # through a long one". That ambiguity hid a truncation bug in the parallel-universe
+    # generator for a week — every call was cut at 16k, repaired into a third of a tree,
+    # and rejected as too small. Say it out loud instead.
+    choice = resp.choices[0]
+    if getattr(choice, "finish_reason", None) == "length":
+        logger.warning(
+            "✂️ Response hit the output token ceiling and was truncated — what follows "
+            "is a repaired fragment, not the model's full answer. Raise max_tokens "
+            "(or AI_MAX_COMPLETION_TOKENS) for this call."
+        )
+    text = (choice.message.content or "").strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text).strip()
