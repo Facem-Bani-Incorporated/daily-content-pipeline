@@ -29,6 +29,7 @@ from schema.models import (
     Actor,
     ChoiceOutcome,
     EndingStat,
+    EraVoice,
     NodeFact,
     ParallelUniverse,
     ParallelUniverseTranslations,
@@ -47,9 +48,23 @@ logger = setup_logger("MainPipeline")
 TARGET_FREE_COUNT = 5
 TARGET_PRO_COUNT = 4  # 1 personalities + 1 media + 1 sport + 1 extra (best-of-the-rest)
 
-# How many events per tier get a Parallel Universes game. The hero only: the tree costs
-# roughly a Long Read to generate, and nine branching games a day would multiply the
-# bill for content most players will never open. Raise once usage justifies it.
+# How many events per tier get a Parallel Universes game. Two: the game now has its own
+# tab rather than living at the bottom of one story, and a hub with a single entry is not
+# a tab. Four games a day (2 FREE + 2 PRO) is the ceiling the budget takes — the tree
+# costs roughly a Long Read each, and every event having one would multiply the daily
+# bill for content most players will never open.
+#
+# Held at 1 while the API budget is tight. Each game is now roughly six calls (one trunk,
+# one for the endings, four translations), so 1 costs about 12 a day across both tiers and
+# 2 costs 24. The hub shows the whole 60-day archive, so one new fork a day still fills
+# the tab — it just fills it over a fortnight rather than a weekend. Raise when the
+# budget allows.
+#
+# This is a target, not a slice: the generator is handed the whole tier and falls down
+# the list when a story has no usable hinge, escalating from the obvious fork to the
+# argument contemporaries were having to the near miss that almost happened. It gives up
+# on the extras before it gives up on the first one, so a day ends with no game only if
+# every event in the tier failed at every stance.
 PARALLEL_PER_TIER = 1
 
 # Minimum acceptable count before we fall back to non-validated events
@@ -176,12 +191,24 @@ def _parallel_from_db(raw) -> ParallelUniverseTranslations | None:
                                        alt=str(st.get("alt") or ""))
                             for st in n.get("stats", []) if isinstance(st, dict)
                         ],
+                        legacy=[
+                            EraVoice(who=str(v.get("who") or ""),
+                                     mood=str(v.get("mood") or ""),
+                                     quote=str(v.get("quote") or ""))
+                            for v in n.get("legacy", []) if isinstance(v, dict)
+                        ],
                         choices=[
                             UniverseChoice(
                                 id=str(c["id"]), label=str(c.get("label") or ""),
                                 detail=str(c.get("detail") or ""), next=str(c["next"]),
                                 risk=int(c.get("risk") or 50),
                                 actor_effects=c.get("actorEffects") or {},
+                                reactions=[
+                                    EraVoice(who=str(v.get("who") or ""),
+                                             mood=str(v.get("mood") or ""),
+                                             quote=str(v.get("quote") or ""))
+                                    for v in c.get("reactions", []) if isinstance(v, dict)
+                                ],
                                 outcome=(
                                     ChoiceOutcome(
                                         label=str((c.get("outcome") or {}).get("label") or ""),
@@ -324,12 +351,20 @@ def _serialize_parallel(parallel) -> str | None:
                         {"label": st.label, "real": st.real, "alt": st.alt}
                         for st in n.stats
                     ],
+                    "legacy": [
+                        {"who": v.who, "mood": v.mood, "quote": v.quote}
+                        for v in n.legacy
+                    ],
                     "choices": [
                         {
                             "id": c.id, "label": c.label, "detail": c.detail,
                             "next": c.next,
                             "risk": c.risk,
                             "actorEffects": c.actor_effects,
+                            "reactions": [
+                                {"who": v.who, "mood": v.mood, "quote": v.quote}
+                                for v in c.reactions
+                            ],
                             "outcome": (
                                 {"label": c.outcome.label, "value": c.outcome.value}
                                 if c.outcome else None
@@ -371,12 +406,14 @@ def _parallel_for_index(pmap: dict | None, idx: int) -> ParallelUniverseTranslat
                     rarity=n.get("rarity", ""),
                     facts=[NodeFact(**f) for f in n.get("facts", [])],
                     stats=[EndingStat(**st) for st in n.get("stats", [])],
+                    legacy=[EraVoice(**v) for v in n.get("legacy", [])],
                     choices=[
                         UniverseChoice(
                             id=c["id"], label=c["label"], detail=c["detail"],
                             next=c["next"], effects=WorldEffects(**c["effects"]),
                             actor_effects=c.get("actor_effects", {}),
                             risk=c.get("risk", 50),
+                            reactions=[EraVoice(**v) for v in c.get("reactions", [])],
                             outcome=ChoiceOutcome(**c["outcome"]) if c.get("outcome") else None,
                         )
                         for c in n["choices"]
@@ -568,6 +605,34 @@ def _backfill_to_minimum(
 # FREE PIPELINE
 # Target: 5 events labeled is_pro=False
 # ══════════════════════════════════════════════════════════════════
+async def _enrich(quiz_gen, processor, items: list, narratives_map: dict, today):
+    """Quizzes, long reads and the branching game, at the same time.
+
+    All three need only the narratives, and none needs the others, so running them in
+    sequence just added their latencies together — in the 28 Aug run the game did not
+    start until four minutes into the tier and then held the whole pipeline open on its
+    own. Concurrency here is free: the LLM client is async and every generator already
+    fans out internally.
+
+    Returns (quizzes, deep_dives, parallel). A generator that raises takes only its own
+    slice down — a failed quiz must not cost the day its long reads.
+    """
+    results = await asyncio.gather(
+        quiz_gen.generate_quizzes(items, narratives_map),
+        DeepDiveGenerator(processor).generate_deep_dives(items, narratives_map, today),
+        ParallelGenerator(processor).generate(items, narratives_map, today, want=PARALLEL_PER_TIER),
+        return_exceptions=True,
+    )
+    out = []
+    for label, res in zip(("quizzes", "long reads", "parallel universes"), results):
+        if isinstance(res, BaseException):
+            logger.error(f"🚨 {label} failed for this tier: {res}", exc_info=res)
+            out.append({})
+        else:
+            out.append(res)
+    return tuple(out)
+
+
 async def run_free_pipeline(
     today: datetime,
     processor: AIProcessor,
@@ -663,15 +728,9 @@ async def run_free_pipeline(
         if high_quality:
             logger.info("✍️ FREE REFRESH — Generating narratives for new events...")
             narratives_map = await processor.generate_secondary_narratives(high_quality, today)
-            quizzes = await quiz_gen.generate_quizzes(high_quality, narratives_map)
-            logger.info("📚 FREE REFRESH — Generating long reads...")
-            deep_dives = await DeepDiveGenerator(processor).generate_deep_dives(
-                high_quality, narratives_map, today
-            )
-
-            logger.info("🌌 FREE REFRESH — Generating the parallel universe game...")
-            parallel = await ParallelGenerator(processor).generate(
-                high_quality[:PARALLEL_PER_TIER], narratives_map, today
+            logger.info("🧠📚🌌 FREE REFRESH — Quizzes, long reads and the game, together...")
+            quizzes, deep_dives, parallel = await _enrich(
+                quiz_gen, processor, high_quality, narratives_map, today
             )
             new_details = await _build_event_details(
                 high_quality, narratives_map, quizzes, today, scraper, is_pro=False,
@@ -707,17 +766,9 @@ async def run_free_pipeline(
     logger.info("✍️ FREE — Generating narratives...")
     narratives_map = await processor.generate_secondary_narratives(selected, today)
 
-    logger.info("🧠 FREE — Generating quizzes...")
-    quizzes = await quiz_gen.generate_quizzes(selected, narratives_map)
-
-    logger.info("📚 FREE — Generating long reads...")
-    deep_dives = await DeepDiveGenerator(processor).generate_deep_dives(
-        selected, narratives_map, today
-    )
-
-    logger.info("🌌 FREE — Generating the parallel universe game...")
-    parallel = await ParallelGenerator(processor).generate(
-        selected[:PARALLEL_PER_TIER], narratives_map, today
+    logger.info("🧠📚🌌 FREE — Quizzes, long reads and the game, together...")
+    quizzes, deep_dives, parallel = await _enrich(
+        quiz_gen, processor, selected, narratives_map, today
     )
 
     final_events_list = await _build_event_details(
@@ -863,15 +914,9 @@ async def run_pro_pipeline(
         if high_quality:
             logger.info("✍️ PRO REFRESH — Generating narratives for new events...")
             narratives_map = await processor.generate_secondary_narratives(high_quality, today)
-            quizzes = await quiz_gen.generate_quizzes(high_quality, narratives_map)
-            logger.info("📚 PRO REFRESH — Generating long reads...")
-            deep_dives = await DeepDiveGenerator(processor).generate_deep_dives(
-                high_quality, narratives_map, today
-            )
-
-            logger.info("🌌 PRO REFRESH — Generating the parallel universe game...")
-            parallel = await ParallelGenerator(processor).generate(
-                high_quality[:PARALLEL_PER_TIER], narratives_map, today
+            logger.info("🧠📚🌌 PRO REFRESH — Quizzes, long reads and the game, together...")
+            quizzes, deep_dives, parallel = await _enrich(
+                quiz_gen, processor, high_quality, narratives_map, today
             )
             new_details = await _build_event_details(
                 high_quality, narratives_map, quizzes, today, scraper, is_pro=True,
@@ -902,17 +947,9 @@ async def run_pro_pipeline(
     logger.info("✍️ PRO — Generating narratives...")
     narratives_map = await processor.generate_secondary_narratives(pro_selected, today)
 
-    logger.info("🧠 PRO — Generating quizzes...")
-    quizzes = await quiz_gen.generate_quizzes(pro_selected, narratives_map)
-
-    logger.info("📚 PRO — Generating long reads...")
-    deep_dives = await DeepDiveGenerator(processor).generate_deep_dives(
-        pro_selected, narratives_map, today
-    )
-
-    logger.info("🌌 PRO — Generating the parallel universe game...")
-    parallel = await ParallelGenerator(processor).generate(
-        pro_selected[:PARALLEL_PER_TIER], narratives_map, today
+    logger.info("🧠📚🌌 PRO — Quizzes, long reads and the game, together...")
+    quizzes, deep_dives, parallel = await _enrich(
+        quiz_gen, processor, pro_selected, narratives_map, today
     )
 
     final_pro_list = await _build_event_details(

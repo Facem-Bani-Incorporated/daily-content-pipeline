@@ -115,6 +115,19 @@ class NodeFact(BaseModel):
     value: str            # "15,000, unpaid since spring"
 
 
+class EraVoice(BaseModel):
+    """One person alive at that moment, reacting to what the player just did.
+
+    `mood` is a closed vocabulary (see VALID_MOODS in engine/parallel.py) because the app
+    switches on it for colour, icon and the running public-mood reading — a mood outside
+    the set would be a voice the UI cannot draw. It is therefore never translated; the
+    quote around it is."""
+    who: str              # "A Prague pewterer", "Tilly's unpaid sergeants"
+    mood: str             # elated | hopeful | relieved | defiant | uneasy |
+                          # resigned | afraid | angry | betrayed | grieving
+    quote: str            # one sentence, in their own voice
+
+
 class ChoiceOutcome(BaseModel):
     """The one concrete thing this choice commits, previewed on the card."""
     label: str            # "Troops committed"
@@ -137,6 +150,9 @@ class UniverseChoice(BaseModel):
     actor_effects: dict = {}
     risk: int = 50        # 0-100, how likely this backfires
     outcome: Optional[ChoiceOutcome] = None
+    # Two or three voices from the week this was decided. The meters say what changed;
+    # these say who is furious about it, which is the half a bar cannot carry.
+    reactions: List[EraVoice] = []
     next: str             # id of the node this leads to
 
 
@@ -154,14 +170,17 @@ class UniverseNode(BaseModel):
     epitaph: str = ""     # the last line the player is left with
     rarity: str = ""      # common | uncommon | rare — drives the badge and the collection
     stats: List[EndingStat] = []
+    # The same idea as a choice's reactions, generations later: how the people who ended
+    # up living in this world talk about what was decided.
+    legacy: List[EraVoice] = []
 
 
 class ParallelUniverse(BaseModel):
     """The whole decision tree for one event, in one language.
 
-    Three choices at the opening, two after: 1 + 3 + 6 = 10 decision nodes and 12
-    endings, 22 in all. The extra width sits where agency matters most — the first
-    decision — without the 40 nodes that three-wide-throughout would cost.
+    Three choices at the first two levels, two at the last: 1 + 3 + 9 = 13 decision
+    nodes and 18 endings, 31 in all. Width sits where agency matters most; three-wide
+    throughout would mean 40 endings, more than anyone will ever collect.
     """
     pivot_year: str       # the moment history forks
     pivot_title: str
@@ -198,8 +217,8 @@ class EventDetail(BaseModel):
     # generator failed — the app then shows no teaser at all rather than promising
     # content that does not exist.
     deep_dive: Optional[DeepDiveTranslations] = None
-    # Branching what-if game. Generated only for the day's two hero events, so most
-    # events legitimately have none.
+    # Branching what-if game. Generated only for the top events of each tier (see
+    # PARALLEL_PER_TIER in main.py), so most events legitimately have none.
     parallel: Optional[ParallelUniverseTranslations] = None
     # Per-language push-notification hook (TikTok-style). Two parallel Translations so the
     # Java backend can reuse its existing translations table for each.
