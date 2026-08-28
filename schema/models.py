@@ -99,11 +99,44 @@ class WorldEffects(BaseModel):
     freedom: int = 0     # liberty vs control
 
 
+class Actor(BaseModel):
+    """A real faction or person with a stake in the outcome. Their standing moves with
+    every choice, which is what turns four abstract meters into a political situation."""
+    id: str
+    name: str             # "The Bohemian Estates", "Maximilian of Bavaria"
+    start: int = 50       # 0-100
+
+
+class NodeFact(BaseModel):
+    """A hard number about the situation, shown as a data strip above the choices.
+    This is the antidote to a wall of prose: the player should see the constraints
+    they are deciding under, not read about them."""
+    label: str            # "Bohemian army"
+    value: str            # "15,000, unpaid since spring"
+
+
+class ChoiceOutcome(BaseModel):
+    """The one concrete thing this choice commits, previewed on the card."""
+    label: str            # "Troops committed"
+    value: str            # "24,000"
+
+
+class EndingStat(BaseModel):
+    """A number from your world set against the real one. The ending's payload."""
+    label: str            # "Deaths in the German lands"
+    real: str             # "8 million"
+    alt: str              # "under 1 million"
+
+
 class UniverseChoice(BaseModel):
     id: str
     label: str            # short — it sits on a button
     detail: str           # one line of what this actually means
     effects: WorldEffects
+    # actor id -> standing delta. Every choice pleases someone and costs someone else.
+    actor_effects: dict = {}
+    risk: int = 50        # 0-100, how likely this backfires
+    outcome: Optional[ChoiceOutcome] = None
     next: str             # id of the node this leads to
 
 
@@ -112,27 +145,29 @@ class UniverseNode(BaseModel):
     id: str
     year: str             # shown on the branching timeline
     title: str
-    text: str             # 60-110 words; this is a game, not an essay
+    text: str             # 45-85 words. Short on purpose — the data carries the rest.
+    facts: List[NodeFact] = []
     choices: List[UniverseChoice] = []
 
     # ── Endings only ──
     verdict: str = ""     # one line: better, worse, or unrecognisable
     epitaph: str = ""     # the last line the player is left with
     rarity: str = ""      # common | uncommon | rare — drives the badge and the collection
+    stats: List[EndingStat] = []
 
 
 class ParallelUniverse(BaseModel):
     """The whole decision tree for one event, in one language.
 
-    Depth 3, two choices per node: 1 + 2 + 4 = 7 decision nodes and 8 endings. That
-    shape is deliberate — 15 nodes is small enough to generate coherently in a single
-    call, and eight endings is enough that "3 of 8 discovered" pulls a player back into
-    an event they have already seen.
+    Three choices at the opening, two after: 1 + 3 + 6 = 10 decision nodes and 12
+    endings, 22 in all. The extra width sits where agency matters most — the first
+    decision — without the 40 nodes that three-wide-throughout would cost.
     """
     pivot_year: str       # the moment history forks
     pivot_title: str
     premise: str          # what actually happened, in two sentences, before we change it
     root: str             # id of the opening node
+    actors: List[Actor] = []
     nodes: List[UniverseNode] = []
 
 

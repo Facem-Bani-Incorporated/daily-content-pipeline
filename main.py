@@ -26,6 +26,10 @@ from schema.models import (
     DeepDive,
     DeepDiveChapter,
     DeepDiveTranslations,
+    Actor,
+    ChoiceOutcome,
+    EndingStat,
+    NodeFact,
     ParallelUniverse,
     ParallelUniverseTranslations,
     UniverseChoice,
@@ -149,6 +153,11 @@ def _parallel_from_db(raw) -> ParallelUniverseTranslations | None:
                 pivot_title=str(p.get("pivotTitle") or ""),
                 premise=str(p.get("premise") or ""),
                 root=str(p.get("root") or "n0"),
+                actors=[
+                    Actor(id=str(a["id"]), name=str(a.get("name") or ""),
+                          start=int(a.get("start") or 50))
+                    for a in p.get("actors", []) if isinstance(a, dict) and a.get("id")
+                ],
                 nodes=[
                     UniverseNode(
                         id=str(n["id"]), year=str(n.get("year") or ""),
@@ -156,10 +165,29 @@ def _parallel_from_db(raw) -> ParallelUniverseTranslations | None:
                         verdict=str(n.get("verdict") or ""),
                         epitaph=str(n.get("epitaph") or ""),
                         rarity=str(n.get("rarity") or ""),
+                        facts=[
+                            NodeFact(label=str(f.get("label") or ""),
+                                     value=str(f.get("value") or ""))
+                            for f in n.get("facts", []) if isinstance(f, dict)
+                        ],
+                        stats=[
+                            EndingStat(label=str(st.get("label") or ""),
+                                       real=str(st.get("real") or ""),
+                                       alt=str(st.get("alt") or ""))
+                            for st in n.get("stats", []) if isinstance(st, dict)
+                        ],
                         choices=[
                             UniverseChoice(
                                 id=str(c["id"]), label=str(c.get("label") or ""),
                                 detail=str(c.get("detail") or ""), next=str(c["next"]),
+                                risk=int(c.get("risk") or 50),
+                                actor_effects=c.get("actorEffects") or {},
+                                outcome=(
+                                    ChoiceOutcome(
+                                        label=str((c.get("outcome") or {}).get("label") or ""),
+                                        value=str((c.get("outcome") or {}).get("value") or ""),
+                                    ) if c.get("outcome") else None
+                                ),
                                 effects=WorldEffects(**(c.get("effects") or {})),
                             )
                             for c in n.get("choices", []) if isinstance(c, dict)
@@ -284,14 +312,28 @@ def _serialize_parallel(parallel) -> str | None:
             "pivotTitle": pu.pivot_title,
             "premise": pu.premise,
             "root": pu.root,
+            "actors": [
+                {"id": a.id, "name": a.name, "start": a.start} for a in pu.actors
+            ],
             "nodes": [
                 {
                     "id": n.id, "year": n.year, "title": n.title, "text": n.text,
                     "verdict": n.verdict, "epitaph": n.epitaph, "rarity": n.rarity,
+                    "facts": [{"label": f.label, "value": f.value} for f in n.facts],
+                    "stats": [
+                        {"label": st.label, "real": st.real, "alt": st.alt}
+                        for st in n.stats
+                    ],
                     "choices": [
                         {
                             "id": c.id, "label": c.label, "detail": c.detail,
                             "next": c.next,
+                            "risk": c.risk,
+                            "actorEffects": c.actor_effects,
+                            "outcome": (
+                                {"label": c.outcome.label, "value": c.outcome.value}
+                                if c.outcome else None
+                            ),
                             "effects": {
                                 "stability": c.effects.stability,
                                 "lives": c.effects.lives,
@@ -321,15 +363,21 @@ def _parallel_for_index(pmap: dict | None, idx: int) -> ParallelUniverseTranslat
         langs[lang] = ParallelUniverse(
             pivot_year=p["pivot_year"], pivot_title=p["pivot_title"],
             premise=p["premise"], root=p["root"],
+            actors=[Actor(**a) for a in p.get("actors", [])],
             nodes=[
                 UniverseNode(
                     id=n["id"], year=n["year"], title=n["title"], text=n["text"],
                     verdict=n.get("verdict", ""), epitaph=n.get("epitaph", ""),
                     rarity=n.get("rarity", ""),
+                    facts=[NodeFact(**f) for f in n.get("facts", [])],
+                    stats=[EndingStat(**st) for st in n.get("stats", [])],
                     choices=[
                         UniverseChoice(
                             id=c["id"], label=c["label"], detail=c["detail"],
                             next=c["next"], effects=WorldEffects(**c["effects"]),
+                            actor_effects=c.get("actor_effects", {}),
+                            risk=c.get("risk", 50),
+                            outcome=ChoiceOutcome(**c["outcome"]) if c.get("outcome") else None,
                         )
                         for c in n["choices"]
                     ],
