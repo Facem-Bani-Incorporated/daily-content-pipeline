@@ -12,6 +12,7 @@ from core.config import config
 from engine.scraper import WikiScraper
 from engine.processor import AIProcessor
 from engine.deep_dive import DeepDiveGenerator
+from engine.parallel import ParallelGenerator
 from engine.quiz_generator import QuizGenerator
 from engine.ranker import ScoringEngine
 from engine.social_agent import SocialMediaAgent
@@ -25,6 +26,11 @@ from schema.models import (
     DeepDive,
     DeepDiveChapter,
     DeepDiveTranslations,
+    ParallelUniverse,
+    ParallelUniverseTranslations,
+    UniverseChoice,
+    UniverseNode,
+    WorldEffects,
 )
 
 logger = setup_logger("MainPipeline")
@@ -36,6 +42,11 @@ logger = setup_logger("MainPipeline")
 # produces the right counts.
 TARGET_FREE_COUNT = 5
 TARGET_PRO_COUNT = 4  # 1 personalities + 1 media + 1 sport + 1 extra (best-of-the-rest)
+
+# How many events per tier get a Parallel Universes game. The hero only: the tree costs
+# roughly a Long Read to generate, and nine branching games a day would multiply the
+# bill for content most players will never open. Raise once usage justifies it.
+PARALLEL_PER_TIER = 1
 
 # Minimum acceptable count before we fall back to non-validated events
 MIN_FREE_COUNT = 5
@@ -108,7 +119,59 @@ def _db_row_to_event_detail(row: dict) -> EventDetail:
         # whole day, so a filler event sent without its deep dive would delete one that
         # was already generated and paid for.
         deep_dive=_deep_dive_from_db(row.get("deep_dive")),
+        # Same reasoning: the Java upsert clears the day, so a filler event sent without
+        # its game would delete one that was already generated and paid for.
+        parallel=_parallel_from_db(row.get("parallel_universe")),
     )
+
+
+def _parallel_from_db(raw) -> ParallelUniverseTranslations | None:
+    """Rebuild the game from the stored column. Anything malformed yields None — a
+    filler event without a game is a small loss, a crashed run is a large one."""
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(data, dict):
+            return None
+    except Exception:
+        logger.warning("⚠️ Filler event has unparseable parallel_universe — dropping it")
+        return None
+
+    langs = {}
+    for lang in ("en", "ro", "es", "de", "fr"):
+        p = data.get(lang)
+        if not isinstance(p, dict) or not p.get("nodes"):
+            continue
+        try:
+            langs[lang] = ParallelUniverse(
+                pivot_year=str(p.get("pivotYear") or ""),
+                pivot_title=str(p.get("pivotTitle") or ""),
+                premise=str(p.get("premise") or ""),
+                root=str(p.get("root") or "n0"),
+                nodes=[
+                    UniverseNode(
+                        id=str(n["id"]), year=str(n.get("year") or ""),
+                        title=str(n.get("title") or ""), text=str(n.get("text") or ""),
+                        verdict=str(n.get("verdict") or ""),
+                        epitaph=str(n.get("epitaph") or ""),
+                        rarity=str(n.get("rarity") or ""),
+                        choices=[
+                            UniverseChoice(
+                                id=str(c["id"]), label=str(c.get("label") or ""),
+                                detail=str(c.get("detail") or ""), next=str(c["next"]),
+                                effects=WorldEffects(**(c.get("effects") or {})),
+                            )
+                            for c in n.get("choices", []) if isinstance(c, dict)
+                        ],
+                    )
+                    for n in p["nodes"] if isinstance(n, dict) and n.get("id")
+                ],
+            )
+        except Exception:
+            continue
+
+    return ParallelUniverseTranslations(**langs) if langs else None
 
 
 def _deep_dive_from_db(raw) -> DeepDiveTranslations | None:
@@ -202,6 +265,81 @@ def _serialize_deep_dive_teaser(deep_dive) -> str | None:
     return json.dumps(payload, ensure_ascii=False) if payload else None
 
 
+def _serialize_parallel(parallel) -> str | None:
+    """The whole branching game as a JSON string, keyed by language.
+
+    Sent to every user, not just PRO. The client decides who may play it — unlike the
+    long read there is no line to draw inside the payload, and the tree is worthless
+    without the UI that runs it.
+    """
+    if parallel is None:
+        return None
+    payload = {}
+    for lang in ("en", "ro", "es", "de", "fr"):
+        pu = getattr(parallel, lang, None)
+        if pu is None or not pu.nodes:
+            continue
+        payload[lang] = {
+            "pivotYear": pu.pivot_year,
+            "pivotTitle": pu.pivot_title,
+            "premise": pu.premise,
+            "root": pu.root,
+            "nodes": [
+                {
+                    "id": n.id, "year": n.year, "title": n.title, "text": n.text,
+                    "verdict": n.verdict, "epitaph": n.epitaph, "rarity": n.rarity,
+                    "choices": [
+                        {
+                            "id": c.id, "label": c.label, "detail": c.detail,
+                            "next": c.next,
+                            "effects": {
+                                "stability": c.effects.stability,
+                                "lives": c.effects.lives,
+                                "progress": c.effects.progress,
+                                "freedom": c.effects.freedom,
+                            },
+                        }
+                        for c in n.choices
+                    ],
+                }
+                for n in pu.nodes
+            ],
+        }
+    return json.dumps(payload, ensure_ascii=False) if payload else None
+
+
+def _parallel_for_index(pmap: dict | None, idx: int) -> ParallelUniverseTranslations | None:
+    """Pick this event's game out of the generator output. Absent is normal — only the
+    hero of each tier gets one."""
+    if not pmap:
+        return None
+    entry = pmap.get(f"EVENT_{idx}")
+    if not entry:
+        return None
+    langs = {}
+    for lang, p in entry.items():
+        langs[lang] = ParallelUniverse(
+            pivot_year=p["pivot_year"], pivot_title=p["pivot_title"],
+            premise=p["premise"], root=p["root"],
+            nodes=[
+                UniverseNode(
+                    id=n["id"], year=n["year"], title=n["title"], text=n["text"],
+                    verdict=n.get("verdict", ""), epitaph=n.get("epitaph", ""),
+                    rarity=n.get("rarity", ""),
+                    choices=[
+                        UniverseChoice(
+                            id=c["id"], label=c["label"], detail=c["detail"],
+                            next=c["next"], effects=WorldEffects(**c["effects"]),
+                        )
+                        for c in n["choices"]
+                    ],
+                )
+                for n in p["nodes"]
+            ],
+        )
+    return ParallelUniverseTranslations(**langs)
+
+
 def _serialize_quiz(quiz) -> dict | None:
     """
     Serialize QuizTranslations into the JSON structure expected by the Java backend.
@@ -271,6 +409,7 @@ async def send_to_java(payload: DailyPayload):
             # carries the chapter titles and word count and goes to everyone.
             "deepDive": _serialize_deep_dive(ev.deep_dive),
             "deepDiveTeaser": _serialize_deep_dive_teaser(ev.deep_dive),
+            "parallelUniverse": _serialize_parallel(ev.parallel),
         }
         events_final.append(ev_dict)
 
@@ -481,9 +620,14 @@ async def run_free_pipeline(
             deep_dives = await DeepDiveGenerator(processor).generate_deep_dives(
                 high_quality, narratives_map, today
             )
+
+            logger.info("🌌 FREE REFRESH — Generating the parallel universe game...")
+            parallel = await ParallelGenerator(processor).generate(
+                high_quality[:PARALLEL_PER_TIER], narratives_map, today
+            )
             new_details = await _build_event_details(
                 high_quality, narratives_map, quizzes, today, scraper, is_pro=False,
-                deep_dives_map=deep_dives,
+                deep_dives_map=deep_dives, parallel_map=parallel,
             )
 
         final_events_list = new_details + filler_details
@@ -523,9 +667,14 @@ async def run_free_pipeline(
         selected, narratives_map, today
     )
 
+    logger.info("🌌 FREE — Generating the parallel universe game...")
+    parallel = await ParallelGenerator(processor).generate(
+        selected[:PARALLEL_PER_TIER], narratives_map, today
+    )
+
     final_events_list = await _build_event_details(
         selected, narratives_map, quizzes, today, scraper, is_pro=False,
-        deep_dives_map=deep_dives,
+        deep_dives_map=deep_dives, parallel_map=parallel,
     )
 
     return final_events_list, {
@@ -671,9 +820,14 @@ async def run_pro_pipeline(
             deep_dives = await DeepDiveGenerator(processor).generate_deep_dives(
                 high_quality, narratives_map, today
             )
+
+            logger.info("🌌 PRO REFRESH — Generating the parallel universe game...")
+            parallel = await ParallelGenerator(processor).generate(
+                high_quality[:PARALLEL_PER_TIER], narratives_map, today
+            )
             new_details = await _build_event_details(
                 high_quality, narratives_map, quizzes, today, scraper, is_pro=True,
-                deep_dives_map=deep_dives,
+                deep_dives_map=deep_dives, parallel_map=parallel,
             )
 
         final_pro_list = new_details + filler_details
@@ -708,9 +862,14 @@ async def run_pro_pipeline(
         pro_selected, narratives_map, today
     )
 
+    logger.info("🌌 PRO — Generating the parallel universe game...")
+    parallel = await ParallelGenerator(processor).generate(
+        pro_selected[:PARALLEL_PER_TIER], narratives_map, today
+    )
+
     final_pro_list = await _build_event_details(
         pro_selected, narratives_map, quizzes, today, scraper, is_pro=True,
-        deep_dives_map=deep_dives,
+        deep_dives_map=deep_dives, parallel_map=parallel,
     )
 
     return final_pro_list, {
@@ -733,6 +892,7 @@ async def _build_event_details(
     scraper: WikiScraper,
     is_pro: bool,
     deep_dives_map: dict | None = None,
+    parallel_map: dict | None = None,
 ) -> list:
     tier_tag = "pro" if is_pro else "free"
     final_list = []
@@ -813,6 +973,7 @@ async def _build_event_details(
                 is_pro=is_pro,
                 location=item.get("location"),
                 deep_dive=_deep_dive_for_index(deep_dives_map, idx),
+                parallel=_parallel_for_index(parallel_map, idx),
             )
         )
 

@@ -89,6 +89,61 @@ class DeepDive(BaseModel):
     word_count: int = 0
 
 
+class WorldEffects(BaseModel):
+    """How one choice moves the four world meters. Deltas, not absolutes, so a run is
+    the sum of its decisions. Range roughly -30..+30 each; the generator is told to
+    make trade-offs rather than let every meter rise together."""
+    stability: int = 0   # order vs chaos
+    lives: int = 0       # human cost
+    progress: int = 0    # science, industry, knowledge
+    freedom: int = 0     # liberty vs control
+
+
+class UniverseChoice(BaseModel):
+    id: str
+    label: str            # short — it sits on a button
+    detail: str           # one line of what this actually means
+    effects: WorldEffects
+    next: str             # id of the node this leads to
+
+
+class UniverseNode(BaseModel):
+    """One beat of the branching story. An empty `choices` list marks an ending."""
+    id: str
+    year: str             # shown on the branching timeline
+    title: str
+    text: str             # 60-110 words; this is a game, not an essay
+    choices: List[UniverseChoice] = []
+
+    # ── Endings only ──
+    verdict: str = ""     # one line: better, worse, or unrecognisable
+    epitaph: str = ""     # the last line the player is left with
+    rarity: str = ""      # common | uncommon | rare — drives the badge and the collection
+
+
+class ParallelUniverse(BaseModel):
+    """The whole decision tree for one event, in one language.
+
+    Depth 3, two choices per node: 1 + 2 + 4 = 7 decision nodes and 8 endings. That
+    shape is deliberate — 15 nodes is small enough to generate coherently in a single
+    call, and eight endings is enough that "3 of 8 discovered" pulls a player back into
+    an event they have already seen.
+    """
+    pivot_year: str       # the moment history forks
+    pivot_title: str
+    premise: str          # what actually happened, in two sentences, before we change it
+    root: str             # id of the opening node
+    nodes: List[UniverseNode] = []
+
+
+class ParallelUniverseTranslations(BaseModel):
+    en: Optional[ParallelUniverse] = None
+    ro: Optional[ParallelUniverse] = None
+    es: Optional[ParallelUniverse] = None
+    de: Optional[ParallelUniverse] = None
+    fr: Optional[ParallelUniverse] = None
+
+
 class DeepDiveTranslations(BaseModel):
     en: Optional[DeepDive] = None
     ro: Optional[DeepDive] = None
@@ -108,6 +163,9 @@ class EventDetail(BaseModel):
     # generator failed — the app then shows no teaser at all rather than promising
     # content that does not exist.
     deep_dive: Optional[DeepDiveTranslations] = None
+    # Branching what-if game. Generated only for the day's two hero events, so most
+    # events legitimately have none.
+    parallel: Optional[ParallelUniverseTranslations] = None
     # Per-language push-notification hook (TikTok-style). Two parallel Translations so the
     # Java backend can reuse its existing translations table for each.
     notification_title_translations: Translations = Field(default_factory=_empty_translations)

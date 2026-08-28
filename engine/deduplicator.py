@@ -226,7 +226,7 @@ class EventDeduplicator:
                 """
                 SELECT source_url, event_date, category, impact_score, page_views_30d,
                        title_translations, narrative_translations, is_pro, location, gallery,
-                       deep_dive
+                       deep_dive, parallel_universe
                 FROM events
                 WHERE EXTRACT(MONTH FROM event_date) = %s
                   AND EXTRACT(DAY FROM event_date) = %s
