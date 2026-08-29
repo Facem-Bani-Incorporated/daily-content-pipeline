@@ -76,6 +76,11 @@ def min_decisions(depth: int) -> int:
     return sum(MIN_CHOICES ** i for i in range(depth))
 MIN_ACTORS = 3
 
+# The gap, on the summed-effects axis, between a node's best and worst option. Sixteen is
+# two clear opposites (+8 and -8), which is what a three-decision run needs to be able to
+# finish twenty points either side of history — the band the app draws the crowd on.
+FLAT_NODE_SPREAD = 16
+
 # How many events beyond `want` the generator may fall through to before giving up. The
 # repair pass means the first candidate now usually works, so this is a safety net for
 # genuinely hingeless days rather than the common path.
@@ -308,11 +313,14 @@ class ParallelGenerator:
                 cand = {**payload, "root": root, "nodes": nodes}
                 ok, why = self._validate_trunk(cand, slots, depth)
                 if ok:
+                    decisions = [n for n in nodes if n.get("choices")]
+                    moving = sum(1 for n in decisions if self._node_spread(n) >= FLAT_NODE_SPREAD)
                     short = "" if depth == MAX_DEPTH else f" — SHALLOW, {depth} decisions"
                     logger.info(
                         f"🌳 Parallel {idx}:trunk — {len(nodes)}/{TARGET_DECISIONS} decisions, "
                         f"{len(slots)} ending slots "
-                        f"(kept {len(nodes)} of {raw} returned, {stance}{short})"
+                        f"(kept {len(nodes)} of {raw} returned, {stance}{short}, "
+                        f"{moving}/{len(decisions)} nodes move the world)"
                     )
                     return cand, slots, depth
             logger.warning(f"⚠️ Parallel {idx}:trunk {stance}: {why} (model returned {raw} nodes)")
@@ -434,6 +442,19 @@ THE FOUR METERS
 
 RULE: every choice must TRADE. At least one meter up AND at least one down. A choice
 where everything improves has nothing at stake — rewrite it.
+
+RULE: the four effects must not CANCEL OUT. Add them up — that sum is where the world
+lands, and the screen draws it. Across the options at one node those sums must spread:
+at least one option must leave the world clearly better (sum >= +8) and at least one
+clearly worse (sum <= -8). Three options that all sum to roughly nothing are three ways
+of changing nothing, and a whole run of them ends exactly where history did.
+
+Aim so that a player who keeps choosing well finishes twenty or more points above
+history, and one who keeps choosing badly twenty or more below.
+
+A net-positive option is NOT the obviously correct one. It can cost you every actor's
+standing and enrage the people — that is what `actor_effects` and `reactions` are for.
+Good for the world and ruinous for you is the most interesting card in the game.
 
 ACTOR EFFECTS
 `actor_effects` maps actor ids to standing deltas, -30 to +30. Every choice must move at
@@ -891,6 +912,19 @@ Return JSON with "pivot_title", "premise", "actors" and "nodes" as above, in {la
         return flaws
 
     @staticmethod
+    def _node_spread(n: dict) -> int:
+        """How far apart this node's options leave the world.
+
+        Each choice's four effects sum to where it puts the world; the spread is the gap
+        between the best and worst option on that axis. A node whose options all sum to
+        about nothing is three ways of changing nothing, and a run of them lands exactly
+        on history — which is what kept the crowd stuck between its three states for
+        entire runs, since the screen reads that same sum.
+        """
+        nets = [sum(c["effects"].values()) for c in n.get("choices", []) if c.get("effects")]
+        return max(nets) - min(nets) if len(nets) > 1 else 0
+
+    @staticmethod
     def _choice_broken(c: dict) -> bool:
         """Fatal: the card cannot be drawn or the tap goes nowhere."""
         return not c["label"] or not c["detail"] or not c["next"]
@@ -1022,6 +1056,12 @@ Return JSON with "pivot_title", "premise", "actors" and "nodes" as above, in {la
                            + str(depth) + ", need " + str(floor))
         if len(slots) < MIN_ENDINGS:
             return False, str(len(slots)) + " ending slots, need " + str(MIN_ENDINGS)
+
+        decisions = [n for n in p["nodes"] if n.get("choices")]
+        moving = [n for n in decisions if self._node_spread(n) >= FLAT_NODE_SPREAD]
+        if decisions and not moving:
+            return False, ("every decision leaves the world in the same place — "
+                           "no node spreads its options by " + str(FLAT_NODE_SPREAD))
         return True, "OK"
 
     def _validate_endings(self, endings: list, slots: set) -> tuple:
