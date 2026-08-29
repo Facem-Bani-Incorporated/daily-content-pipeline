@@ -81,6 +81,10 @@ MIN_ACTORS = 3
 # finish twenty points either side of history — the band the app draws the crowd on.
 FLAT_NODE_SPREAD = 16
 
+# The smallest single-meter move worth putting on a card. Below this the bar it draws
+# does not visibly change, so the choice reads as having done nothing.
+MIN_METER_MOVE = 8
+
 # How many events beyond `want` the generator may fall through to before giving up. The
 # repair pass means the first candidate now usually works, so this is a safety net for
 # genuinely hingeless days rather than the common path.
@@ -434,7 +438,9 @@ WRITING THE CHOICES
   obviously correct — all must be defensible to someone alive at the time.
 
 THE FOUR METERS
-`effects` carries four integers, -30 to +30:
+`effects` carries four integers, -30 to +30. The app draws each meter as its distance
+from fifty, so these ARE the visible change — at least one meter of every choice must
+move by 8 or more, and a decision that matters should move one by 15 or more:
   stability  order, control, the state holding together
   lives      human cost — positive means fewer people die
   progress   science, industry, knowledge
@@ -897,6 +903,11 @@ Return JSON with "pivot_title", "premise", "actors" and "nodes" as above, in {la
             flaws.append("no effect")
         elif not (any(v > 0 for v in vals) and any(v < 0 for v in vals)):
             flaws.append("trades nothing")
+        elif max(abs(v) for v in vals) < MIN_METER_MOVE:
+            # The app draws a meter as its distance from fifty. A choice whose biggest
+            # effect is four points moves a bar by four pixels, and the player is asked
+            # to weigh a decision that visibly does nothing.
+            flaws.append("barely moves a meter")
         ae = c["actor_effects"]
         if len(ae) < 2:
             flaws.append("moves <2 actors")
