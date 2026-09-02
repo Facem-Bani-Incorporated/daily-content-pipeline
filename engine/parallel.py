@@ -40,6 +40,7 @@ Generated for the top events of each tier — see PARALLEL_PER_TIER in main.py.
 
 import asyncio
 
+from core.llm import budget_allows
 from core.logger import setup_logger
 
 logger = setup_logger("Parallel")
@@ -53,11 +54,18 @@ LANG_NAMES = {"ro": "Romanian", "es": "Spanish", "de": "German", "fr": "French"}
 # count is what made this feature cost money and produce nothing for a week: the model
 # returned 12-16 nodes on every attempt against a demand for 22, so three full
 # completions per event were thrown away and no game was ever generated.
-ROOT_BRANCH = 3      # n0
-MID_BRANCH = 3       # na, nb, nc
-LEAF_BRANCH = 2      # naa … ncc
-TARGET_DECISIONS = 13        # 1 + 3 + 9
-TARGET_ENDINGS = 18          # 9 leaf nodes x 2
+# Narrowed from three-wide to two-wide in Sept 2026, for cost. The old shape was 13
+# decision nodes and 18 endings — 31 nodes, generated once and then translated four
+# times, which made this the most expensive thing the pipeline did by a wide margin.
+# Two-wide at the same depth is 7 decisions and 8 endings: 15 nodes, roughly half the
+# output, and still three real decisions deep. Eight endings is also exactly what
+# MIN_ENDINGS already called the floor worth shipping, so the collection grid keeps
+# working. Widen these back if the game ever earns the tokens.
+ROOT_BRANCH = 2      # n0
+MID_BRANCH = 2       # na, nb
+LEAF_BRANCH = 2      # naa … nbb
+TARGET_DECISIONS = 7         # 1 + 2 + 4
+TARGET_ENDINGS = 8           # 4 leaf nodes x 2
 TARGET_ACTORS = 4
 TARGET_RARE = 2
 
@@ -67,7 +75,7 @@ TARGET_RARE = 2
 MAX_DEPTH = 3        # decisions per run; the app reads "Decision 2 of 3" off this
 MIN_CHOICES = 2      # a node offering one option is a corridor, not a decision
 MIN_DEPTH = 2        # two decisions is still a game; one is a page with buttons
-MIN_ENDINGS = 8      # below this the collection grid is not worth showing
+MIN_ENDINGS = 6      # below this the collection grid is not worth showing
 
 
 def min_decisions(depth: int) -> int:
@@ -90,8 +98,8 @@ MIN_METER_MOVE = 8
 # genuinely hingeless days rather than the common path.
 EXTRA_CANDIDATES = 2
 
-MID_IDS = ["na", "nb", "nc"]
-LEAF_IDS = ["naa", "nab", "nac", "nba", "nbb", "nbc", "nca", "ncb", "ncc"]
+MID_IDS = ["na", "nb"]
+LEAF_IDS = ["naa", "nab", "nba", "nbb"]
 ENDING_IDS = ["e" + str(i) for i in range(1, TARGET_ENDINGS + 1)]
 
 # leaf -> the two endings it opens onto.
@@ -220,6 +228,16 @@ class ParallelGenerator:
             if results and budget <= 0:
                 logger.info(f"🌌 Parallel universes: stopping at {len(results)}/{want} — budget spent")
                 break
+            # The money brake is separate from the candidate brake above: that one counts
+            # attempts, this one counts dollars. The tree is the most expensive thing the
+            # pipeline builds, so it yields before the narratives do — a date with stories
+            # and no game still publishes; a date with a game and no stories does not.
+            if not budget_allows(optional=True):
+                logger.warning(
+                    f"💸 Parallel universes: stopping at {len(results)}/{want} — "
+                    f"spend cap reached for optional stages"
+                )
+                break
             take = min(want - len(results), len(queue))
             batch = [queue.pop(0) for _ in range(take)]
             budget -= len(batch)
@@ -300,7 +318,7 @@ class ParallelGenerator:
                 # seventy-five quotes does not fit in 16k, and on Vertex the thinking
                 # budget comes out of the same allowance. Being clipped here is the
                 # worst possible spend: full price, unusable answer.
-                max_tokens=32768,
+                max_tokens=16384,
                 thinking_budget=self.thinking_budget,
             )
             payload = self._normalize(res)
@@ -342,7 +360,7 @@ class ParallelGenerator:
                 f"Parallel {idx}:endings (attempt {attempt})",
                 {"nodes": []},
                 temperature=0.85,
-                max_tokens=32768,
+                max_tokens=16384,
                 thinking_budget=self.thinking_budget,
             )
             nodes = self._normalize({"nodes": res.get("nodes") if isinstance(res, dict) else []})["nodes"]
@@ -365,7 +383,7 @@ class ParallelGenerator:
         wiring = _NL.join(
             ["  n0  -> " + ", ".join(MID_IDS)] +
             [
-                "  " + mid + " -> " + ", ".join(LEAF_IDS[i * 3:i * 3 + 3])
+                "  " + mid + " -> " + ", ".join(LEAF_IDS[i * MID_BRANCH:(i + 1) * MID_BRANCH])
                 for i, mid in enumerate(MID_IDS)
             ] +
             [
@@ -680,7 +698,7 @@ Return JSON with "pivot_title", "premise", "actors" and "nodes" as above, in {la
             f"Parallel {idx}:{lang}",
             {"nodes": []},
             temperature=0.3,
-            max_tokens=32768,
+            max_tokens=16384,
             thinking_budget=0,
         )
 

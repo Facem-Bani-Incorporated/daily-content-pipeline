@@ -274,6 +274,70 @@ def cost_report() -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# DAILY SPEND CAP
+# ══════════════════════════════════════════════════════════════════════════════
+# The meter above already knows what this run has billed. This turns that number into
+# a brake, so a retry storm or a widened tree cannot quietly produce a $5 day the way
+# Gemini did in Sept 2026 — the bill is found at the end of the month, and by then it
+# has been running for a fortnight.
+#
+# Two ceilings, not one. Everything the app needs to have a day at all — discovery,
+# narratives, their translations, the quiz — spends up to the full cap. The extras that
+# make a day richer but not viable — the Parallel Universes tree, the Long Reads — stop
+# at OPTIONAL_SHARE of it. So when the money runs low the run loses its game and keeps
+# its content, rather than spending everything on one lavish date and leaving the next
+# two blank. That is exactly the failure the 2026-09-02 run produced.
+OPTIONAL_SHARE = 0.60
+
+
+class BudgetExhausted(RuntimeError):
+    """The run has spent its allowance. Not retryable — waiting does not refill it."""
+
+
+def spend_usd() -> float:
+    """What this run has billed so far, read off the same meter as cost_report()."""
+    total = 0.0
+    for r in _usage.values():
+        total += (r["in"] * _PRICE_PER_M["input"] + r["out"] * _PRICE_PER_M["output"]) / 1_000_000
+    return total
+
+
+def _cap() -> float:
+    return float(getattr(config, "AI_DAILY_BUDGET_USD", 0.0) or 0.0)
+
+
+def budget_allows(optional: bool = False) -> bool:
+    """True while there is room to make another call at this priority.
+
+    `optional=True` is the richer-but-skippable work; it yields early so the essential
+    stages keep their share. A cap of 0 disables the brake entirely."""
+    cap = _cap()
+    if not cap:
+        return True
+    ceiling = cap * OPTIONAL_SHARE if optional else cap
+    return spend_usd() < ceiling
+
+
+_budget_warned = False
+
+
+def _check_budget() -> None:
+    global _budget_warned
+    cap = _cap()
+    if not cap:
+        return
+    spent = spend_usd()
+    if spent >= cap:
+        if not _budget_warned:
+            _budget_warned = True
+            logger.error(
+                f"🛑 Daily spend cap reached: ${spent:.4f} of ${cap:.2f}. "
+                f"No further LLM calls this run."
+            )
+        raise BudgetExhausted(f"spent ${spent:.4f} of ${cap:.2f}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # TOKENS-PER-MINUTE BUDGET
 # ══════════════════════════════════════════════════════════════════════════════
 # Groq counts input + max_tokens against a per-minute allowance and refuses the whole
@@ -289,8 +353,73 @@ _tpm_lock = asyncio.Lock()
 _tpm_lock_sync = threading.Lock()
 
 
+# What the provider last told us the per-minute ceiling actually is. Groq states it in
+# the body of every rate-limit error — "on tokens per minute (TPM): Limit 8000" — so the
+# pacer does not have to be told: it starts unpaced and clamps itself the first time it
+# is refused. That matters because AI_TPM_LIMIT is the one setting that is wrong by
+# default after a tier change, and being wrong in the cautious direction is not harmless:
+# an 8000 left over from the free tier makes a Dev-tier account sleep a minute between
+# calls and trims generations that would have fit.
+_learned_limit: int = 0
+
+_TPM_LIMIT_RE = re.compile(r"tokens per minute \(TPM\):\s*Limit\s*(\d+)", re.I)
+
+
+def note_rate_limit(err: Exception) -> None:
+    """Read the real TPM ceiling out of a provider refusal and pace against it."""
+    global _learned_limit
+    m = _TPM_LIMIT_RE.search(str(err))
+    if not m:
+        return
+    found = int(m.group(1))
+    if found and found != _learned_limit:
+        _learned_limit = found
+        logger.warning(
+            f"📉 Provider reports a {found} tokens-per-minute ceiling — pacing against "
+            f"it from now on. Set AI_TPM_LIMIT={found} to skip this discovery."
+        )
+
+
 def _tpm_limit() -> int:
-    return int(getattr(config, "AI_TPM_LIMIT", 8000) or 0)
+    """Configured ceiling, else whatever the provider has told us, else unpaced.
+
+    0 means "do not pace" — the correct starting point on an unknown tier, because the
+    spend cap already bounds the damage and the first refusal teaches us the real number.
+    """
+    configured = int(getattr(config, "AI_TPM_LIMIT", 0) or 0)
+    return configured or _learned_limit
+
+
+# Room left for the provider's own accounting to differ from our four-chars-a-token
+# guess, and the smallest completion still worth asking for. A call trimmed below this
+# would come back truncated, which costs full price for an unusable answer.
+_TPM_HEADROOM = 256
+_MIN_OUTPUT_TOKENS = 512
+
+# How far a reservation may be trimmed before trimming stops being a rescue. A call cut
+# to a third of what it asked for comes back truncated, gets repaired into valid-looking
+# JSON, fails its size check and is regenerated — full price for an unusable answer. A
+# 413, by contrast, is refused before the model runs and bills nothing. So below this
+# fraction we send the request at its real size and let the provider decide: on a tier
+# that allows it the call simply succeeds, and on one that does not it is refused for
+# free. This is also the guard that keeps a stale AI_TPM_LIMIT from silently truncating
+# every Parallel tree after a tier upgrade.
+_MIN_TRIM_FRACTION = 0.6
+
+
+def _trim_target(params: dict, limit: int) -> int | None:
+    """Trimmed max_tokens that still fits the window, or None if trimming would cost
+    more than the refusal it avoids."""
+    room = limit - _input_tokens(params) - _TPM_HEADROOM
+    asked = int(params.get("max_tokens", 0))
+    if room < _MIN_OUTPUT_TOKENS or room < asked * _MIN_TRIM_FRACTION:
+        return None
+    return room
+
+
+def _input_tokens(params: dict) -> int:
+    chars = sum(len(str(m.get("content", ""))) for m in params.get("messages", []))
+    return chars // 4
 
 
 def _estimate_tokens(params: dict) -> int:
@@ -332,10 +461,25 @@ async def _reserve_async(params: dict) -> None:
             now = time.monotonic()
             used = _drop_expired(now)
             if cost > limit:
-                # Nothing will ever make room for this. Let it go and let the provider
-                # say so, rather than sleeping forever on a request that cannot fit.
+                # Nothing will ever make room for this, so waiting is pointless — but
+                # neither is sending it: the provider counts input + max_tokens and
+                # refuses the whole thing with a 413 at any queue depth. Reserving more
+                # output than the model will ever write is what caused that (a deep dive
+                # asked for 8192 to produce ~1300), so trim the reservation to what the
+                # window can actually admit and let the call through.
+                room = _trim_target(params, limit)
+                if room is not None:
+                    logger.warning(
+                        f"request needs ~{cost} tokens, over the {limit} TPM budget — "
+                        f"trimming max_tokens {params.get('max_tokens')} → {room}"
+                    )
+                    params["max_tokens"] = room
+                    _spent.append((now, limit))
+                    return
                 logger.warning(
-                    f"request needs ~{cost} tokens, over the whole {limit} TPM budget — sending anyway"
+                    f"request needs ~{cost} tokens against a {limit} TPM budget and "
+                    f"cannot be trimmed without truncating the answer — sending at full "
+                    f"size. If this 413s, raise AI_TPM_LIMIT to match your Groq tier."
                 )
                 return
             if used + cost <= limit:
@@ -355,7 +499,17 @@ def _reserve_sync(params: dict) -> None:
         with _tpm_lock_sync:
             now = time.monotonic()
             used = _drop_expired(now)
-            if cost > limit or used + cost <= limit:
+            if cost > limit:
+                room = _trim_target(params, limit)
+                if room is not None:
+                    logger.warning(
+                        f"request needs ~{cost} tokens, over the {limit} TPM budget — "
+                        f"trimming max_tokens {params.get('max_tokens')} → {room}"
+                    )
+                    params["max_tokens"] = room
+                _spent.append((now, min(cost, limit)))
+                return
+            if used + cost <= limit:
                 _spent.append((now, cost))
                 return
             delay = _wait_for(cost, used, limit, now)
@@ -364,6 +518,7 @@ def _reserve_sync(params: dict) -> None:
 
 async def achat(params: dict):
     """Async chat completion with automatic fallback if the model name is invalid."""
+    _check_budget()
     await _reserve_async(params)
     client = get_async_client()
     try:
@@ -371,6 +526,7 @@ async def achat(params: dict):
         _record(resp)
         return resp
     except Exception as e:
+        note_rate_limit(e)
         if _is_effort_rejected(e):
             retry = _downgrade_effort(params)
             if retry:
@@ -388,6 +544,7 @@ async def achat(params: dict):
 
 def chat(params: dict):
     """Sync chat completion with automatic fallback if the model name is invalid."""
+    _check_budget()
     _reserve_sync(params)
     client = get_sync_client()
     try:
@@ -395,6 +552,7 @@ def chat(params: dict):
         _record(resp)
         return resp
     except Exception as e:
+        note_rate_limit(e)
         if _is_effort_rejected(e):
             retry = _downgrade_effort(params)
             if retry:

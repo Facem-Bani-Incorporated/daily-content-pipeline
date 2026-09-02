@@ -3,12 +3,43 @@ import json
 import re
 from datetime import datetime
 from core.config import config
-from core.llm import get_async_client, build_params, parse_json_response, achat
-from core.onthisday import fetch_otd_reference
+from core.llm import (
+    get_async_client, build_params, parse_json_response, achat, BudgetExhausted,
+)
+from core.onthisday import fetch_otd_reference, fetch_otd
 from schema.models import EventCategory
 from core.logger import setup_logger
 
 logger = setup_logger("AIProcessor")
+
+# Longer than this and the rate limit is not a hiccup to sleep through — it is the
+# account's window being spent. Groq states the wait in the error body; anything past a
+# couple of minutes outlives the run, so the stage gives up and lets the pipeline fall
+# back rather than burning attempts that are refused on arrival.
+_RETRY_GIVE_UP_SECONDS = 120
+
+_RETRY_AFTER_RE = re.compile(
+    r"try again in (?:(\d+)h)?(?:(\d+)m)?([\d.]+)s", re.I
+)
+
+
+def _retry_after_seconds(err: Exception) -> float | None:
+    """Seconds the provider asked us to wait, or None if it did not say."""
+    m = _RETRY_AFTER_RE.search(str(err))
+    if not m:
+        return None
+    hours = int(m.group(1) or 0)
+    minutes = int(m.group(2) or 0)
+    seconds = float(m.group(3) or 0)
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _is_request_too_large(err: Exception) -> bool:
+    """A 413: input + max_tokens exceeds the whole per-minute allowance. Deterministic
+    at a given size, so resending it unchanged is guaranteed to fail again."""
+    if getattr(err, "status_code", None) == 413:
+        return True
+    return "request too large" in str(err).lower()
 
 
 class AIProcessor:
@@ -174,6 +205,96 @@ class AIProcessor:
             e["location"] = None
         return e
 
+    # ══════════════════════════════════════════════════════════════
+    # OTD FALLBACK — a day must never come back empty
+    # ══════════════════════════════════════════════════════════════
+    # Wikipedia's "On This Day" feed is already fetched to ground the discovery prompt,
+    # and it is curated, date-exact and structured. So when the model returns nothing —
+    # rate limited, refused, or simply having a bad day — there is no reason to ship a
+    # blank date: the real events are sitting in memory, they just have not been dressed
+    # up by an LLM. On 2026-09-02 two dates published nothing at all while this feed was
+    # holding 411 verified entries for them.
+    #
+    # These candidates cost zero tokens and skip the date validator by construction (the
+    # feed is indexed BY date), so they are the one path that still works when the
+    # account's whole allowance is gone.
+    _OTD_CATEGORY_HINTS = [
+        ("war_conflict", ("war", "battle", "invasion", "siege", "troops", "army",
+                          "rebellion", "revolt", "massacre", "bomb", "attack")),
+        ("politics_state", ("treaty", "president", "parliament", "elected", "signed",
+                            "constitution", "independence", "government", "minister")),
+        ("science_discovery", ("discover", "scientist", "experiment", "species",
+                               "astronom", "physic", "chemic", "vaccine", "medical")),
+        ("tech_innovation", ("invent", "patent", "engine", "computer", "telegraph",
+                             "railway", "aircraft", "launch", "satellite", "spacecraft")),
+        ("natural_disaster", ("earthquake", "eruption", "hurricane", "flood", "tsunami",
+                              "cyclone", "wildfire", "famine", "epidemic", "plague")),
+        ("exploration", ("expedition", "voyage", "explorer", "summit", "pole",
+                         "circumnavigat", "landed on")),
+        ("religion_phil", ("pope", "church", "bishop", "monastery", "cathedral",
+                           "philosoph", "council of")),
+        ("sport", ("olympic", "world cup", "championship", "match", "tournament",
+                   "record", "athlet", "football", "boxing")),
+        ("media", ("film", "movie", "album", "single", "broadcast", "premiere",
+                   "television", "radio", "novel", "published")),
+    ]
+
+    @classmethod
+    def _guess_category(cls, text: str, default: str) -> str:
+        """Keyword match, not a model call. A rough category on a real event beats a
+        perfect one that never arrives."""
+        low = (text or "").lower()
+        for cat, needles in cls._OTD_CATEGORY_HINTS:
+            if any(n in low for n in needles):
+                return cat
+        return default
+
+    async def _events_from_otd(
+        self, target_date: datetime, exclude_slugs: set = None, pro: bool = False,
+        want: int = 25,
+    ) -> list:
+        """Build discovery candidates straight from the OTD feed. No LLM, no cost."""
+        try:
+            otd = await fetch_otd(target_date)
+        except Exception as e:
+            logger.error(f"🚨 OTD fallback unavailable: {e!r}")
+            return []
+
+        # "selected" is Wikipedia's own front-page pick for the day, so it leads.
+        sources = (("deaths", 58), ("births", 58)) if pro else                   (("selected", 72), ("events", 62))
+        default_cat = "personalities" if pro else "culture_arts"
+
+        excluded = {s for s in (exclude_slugs or set())}
+        out, seen = [], set()
+        for endpoint, base_score in sources:
+            for e in otd.get(endpoint, []):
+                slug, year = e.get("slug"), e.get("year")
+                text = (e.get("text") or "").strip()
+                if not slug or not isinstance(year, int) or not text:
+                    continue
+                if slug in seen or slug in excluded:
+                    continue
+                seen.add(slug)
+                out.append({
+                    "year": year,
+                    "text": text,
+                    "slug": slug,
+                    "category": self._guess_category(text, default_cat),
+                    "ai_score": base_score,
+                    "date_confidence": "HIGH",
+                    "date_source": f"Wikipedia On This Day feed ({endpoint})",
+                    "location": None,
+                })
+
+        out.sort(key=lambda x: (-x["ai_score"], -x["year"]))
+        selected = out[:want]
+        tier = "PRO" if pro else "FREE"
+        logger.warning(
+            f"🛟 {tier} OTD fallback: built {len(selected)} candidates from the "
+            f"Wikipedia feed without the model"
+        )
+        return selected
+
     @staticmethod
     def _build_avoid_block(exclude_slugs: set = None) -> str:
         """Prompt block listing already-published slugs the AI must not repeat."""
@@ -275,6 +396,15 @@ ONLY HIGH confidence.
             seen_slugs.add(slug)
             validated.append(e)
 
+        if not validated:
+            logger.warning(
+                f"⚠️ Discovery returned nothing usable for {date_str} — falling back to "
+                f"the Wikipedia On This Day feed"
+            )
+            validated = await self._events_from_otd(
+                target_date, exclude_slugs=exclude_slugs, pro=False
+            )
+
         logger.info(f"✅ Found {len(validated)} HIGH-confidence events for {date_str}")
         return validated
 
@@ -349,6 +479,18 @@ ALLOWED: {pro_cats}
         by_cat = {}
         for e in validated:
             by_cat[e["category"]] = by_cat.get(e["category"], 0) + 1
+        if not validated:
+            logger.warning(
+                f"⚠️ PRO discovery returned nothing usable for {date_str} — falling back "
+                f"to the Wikipedia On This Day feed (births/deaths)"
+            )
+            validated = await self._events_from_otd(
+                target_date, exclude_slugs=exclude_slugs, pro=True
+            )
+            by_cat = {}
+            for e in validated:
+                by_cat[e["category"]] = by_cat.get(e["category"], 0) + 1
+
         logger.info(f"✅ PRO discovery: {len(validated)} events → {by_cat}")
         return validated
 
@@ -1149,16 +1291,40 @@ Return JSON with language codes as keys:
         )
         # The Groq SDK already retries 429s (honouring retry-after); this outer loop
         # additionally recovers from an occasional empty/invalid generation.
+        #
+        # What it must NOT do is retry an error that cannot change. On 2026-09-02 this
+        # loop spent twelve minutes re-sending discovery calls against a 429 whose own
+        # message read "try again in 22m", three times each, for two dates — every one
+        # of them refused, and the run ended with two blank days. A rate limit measured
+        # in tens of minutes and a request too large for the window are both verdicts,
+        # not hiccups: take them the first time.
         last_err = None
         for attempt in range(3):
             try:
                 message = await achat(params)
                 return parse_json_response(message)
+            except BudgetExhausted as e:
+                logger.error(f"🛑 AI skipped ({context}) — spend cap reached: {e}")
+                return fallback
             except json.JSONDecodeError as e:
                 last_err = e
                 logger.warning(f"⚠️ JSON parse retry ({context}, attempt {attempt + 1}): {e}")
             except Exception as e:
                 last_err = e
+                wait = _retry_after_seconds(e)
+                if _is_request_too_large(e):
+                    logger.error(
+                        f"🚨 AI Error ({context}) — request too large for the tokens-per-minute "
+                        f"tier; retrying the same size would fail identically. Lower this call's "
+                        f"max_tokens or raise AI_TPM_LIMIT to match your Groq tier."
+                    )
+                    return fallback
+                if wait is not None and wait > _RETRY_GIVE_UP_SECONDS:
+                    logger.error(
+                        f"🚨 AI Error ({context}) — rate limited for {wait / 60:.0f} more minutes; "
+                        f"not retrying. Remaining stages this run will be skipped."
+                    )
+                    return fallback
                 logger.warning(f"⚠️ AI error retry ({context}, attempt {attempt + 1}): {e}")
             if attempt < 2:
                 await asyncio.sleep(2 * (attempt + 1))

@@ -47,8 +47,8 @@ logger = setup_logger("MainPipeline")
 # produces the right counts.
 # 2 for the main screen + 2 in discovery. Down from 5 in Sept 2026: every per-event
 # cost — narrative, translations, quiz, long read — multiplies by this number.
-TARGET_FREE_COUNT = 4
-TARGET_PRO_COUNT = 2  # 2 in discovery. Was 4 (personalities, media, sport, best-of-rest).
+TARGET_FREE_COUNT = 5
+TARGET_PRO_COUNT = 3  # 3 in discovery. Was 4 (personalities, media, sport, best-of-rest).
 
 # How many events per tier get a Parallel Universes game. Two: the game now has its own
 # tab rather than living at the bottom of one story, and a hub with a single entry is not
@@ -70,7 +70,7 @@ TARGET_PRO_COUNT = 2  # 2 in discovery. Was 4 (personalities, media, sport, best
 PARALLEL_PER_TIER = 1
 
 # Minimum acceptable count before we fall back to non-validated events
-MIN_FREE_COUNT = 3
+MIN_FREE_COUNT = 4
 MIN_PRO_COUNT = 2
 
 # Minimum final_score (0-100) for a NEW event to be accepted in refresh mode.

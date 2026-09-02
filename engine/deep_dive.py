@@ -20,6 +20,7 @@ Two rules shape the whole module:
 import asyncio
 import re
 
+from core.llm import budget_allows
 from core.logger import setup_logger
 
 logger = setup_logger("DeepDive")
@@ -77,6 +78,14 @@ class DeepDiveGenerator:
         date_str = target_date.strftime("%B %d")
 
         async def process_single(idx, item):
+            # The long read is the richer half of an event, not the half that makes it
+            # publishable. When the run is near its spend cap it is the first thing to
+            # go, so the remaining dates still get narratives and translations.
+            if not budget_allows(optional=True):
+                logger.warning(
+                    f"💸 DeepDive {idx} skipped — spend cap reached for optional stages"
+                )
+                return f"EVENT_{idx}", None
             short_narrative = narratives_map.get(f"EVENT_{idx}", {}).get("en", "")
             english = await self._generate_english(idx, item, date_str, short_narrative)
             if not english:

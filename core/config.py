@@ -58,7 +58,23 @@ class Settings(BaseSettings):
     # this and refuses the whole request with a 413 rather than queueing it, so the
     # client paces itself in core/llm.py. 8000 is the free tier; raise it with the tier.
     # 0 disables pacing entirely.
-    AI_TPM_LIMIT: int = 8000
+    # 0 = do not pace until the provider says otherwise. core/llm.py reads the real
+    # ceiling out of the first rate-limit error ("tokens per minute (TPM): Limit 8000")
+    # and paces against that, so an unset variable self-corrects instead of pinning a
+    # Dev-tier account to free-tier speed. Set it explicitly to skip the discovery.
+    AI_TPM_LIMIT: int = 0
+
+    # Hard ceiling on what one run may bill, in USD. Groq prices in dollars, so the
+    # budget is kept in dollars and converted at the door: 0.32 USD is about EUR 0.30
+    # at 1.07 USD/EUR. Adjust the number, not the currency.
+    #
+    # The brake lives in core/llm.py and has two levels — the extras (Parallel
+    # Universes, Long Reads) stop at 60% of this, the essential content spends up to
+    # 100%. Set to 0 to disable the cap entirely.
+    #
+    # Note this is per RUN, and one run currently produces three dates (today, tomorrow,
+    # the day after). Raise it if you want every date to get its own game.
+    AI_DAILY_BUDGET_USD: float = 0.32
 
     # The only API key the pipeline needs.
     GROQ_API_KEY: Optional[str] = None
