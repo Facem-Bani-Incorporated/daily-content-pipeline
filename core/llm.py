@@ -80,7 +80,9 @@ _FALLBACK_MODEL = {
     "gemini": "gemini-flash-latest",
     "vertex": "google/gemini-2.5-flash",
     "openai": "gpt-4o-mini",
-    "groq": "llama-3.3-70b-versatile",
+    # Must be a model the account can actually reach: the fallback fires exactly when
+    # AI_MODEL is wrong, so pointing it at something retired turns a typo into a dead run.
+    "groq": "openai/gpt-oss-20b",
 }
 
 # The SDK retries 429s automatically, honouring the provider's retry-after header.
