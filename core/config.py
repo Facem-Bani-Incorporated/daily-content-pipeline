@@ -32,16 +32,15 @@ class Settings(BaseSettings):
     # These calls must reason about which events truly fall on a date, else the model
     # hallucinates and the Wikipedia validator rejects everything. Creative calls skip
     # reasoning entirely. Ignored by providers/models that don't support it (e.g. gpt-4o-mini).
-    # Dropped from "medium" in Sept 2026, for cost. Reasoning tokens bill as OUTPUT
-    # ($2.50/M vs $0.30/M for input), and this applies to the discovery and ranking
-    # calls — the ones that run over every candidate event, not just the nine that
-    # ship. That made it the widest cost surface in the pipeline.
+    # Back to "medium" once the pipeline moved to Groq. This was dropped to "low" for a
+    # day to cut a Gemini bill where reasoning tokens were the largest line item; that
+    # pressure is gone, and low effort here is a false economy anyway — these are the
+    # discovery and ranking calls, and a hallucinated date is rejected by the Wikipedia
+    # validator, which costs a full regeneration and a thinner day of content.
     #
-    # "low" still reasons; it just stops paying for long deliberation on a task the
-    # Wikipedia validator checks afterwards anyway. Watch the validator's rejection
-    # rate after this: if it climbs, the saving is false — rejected events cost a
-    # full regeneration — and this goes back to "medium".
-    AI_REASONING_EFFORT: str = "low"
+    # Creative and mechanical calls never reach this: they pass thinking_budget=0 and
+    # get the provider's idle effort instead.
+    AI_REASONING_EFFORT: str = "medium"
     # Hard cap on max output tokens per request. On Gemini/Vertex reasoning tokens count
     # against this, so discovery (medium reasoning + a long list) needs generous room —
     # Vertex limits are high. Lower it only for a tight tokens-per-minute tier (Groq free).
