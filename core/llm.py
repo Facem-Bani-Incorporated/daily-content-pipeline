@@ -11,8 +11,11 @@ Call sites keep passing the old Anthropic-style inputs (`system`, `prompt`,
 `parse_json_response` reads `choices[0].message.content` and parses JSON leniently.
 """
 
+import asyncio
 import json
 import re
+import threading
+import time
 import traceback
 
 from json_repair import repair_json
@@ -270,8 +273,98 @@ def cost_report() -> str:
     return chr(10).join(out)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# TOKENS-PER-MINUTE BUDGET
+# ══════════════════════════════════════════════════════════════════════════════
+# Groq counts input + max_tokens against a per-minute allowance and refuses the whole
+# request with a 413 when it would break it — it does not queue, and retrying an
+# oversized request just fails again at the same size. The free tier allows 8000 TPM,
+# which a single unpaced pipeline fan-out blows through instantly.
+#
+# So every call books its estimated cost before going out, and waits if the last
+# sixty seconds are already spent. Raise AI_TPM_LIMIT when the account's tier does.
+_TPM_WINDOW = 60.0
+_spent: list[tuple[float, int]] = []   # (timestamp, tokens)
+_tpm_lock = asyncio.Lock()
+_tpm_lock_sync = threading.Lock()
+
+
+def _tpm_limit() -> int:
+    return int(getattr(config, "AI_TPM_LIMIT", 8000) or 0)
+
+
+def _estimate_tokens(params: dict) -> int:
+    """Input plus reserved output — the same sum the provider bills against.
+
+    Four characters to the token is the usual rough conversion, and erring high is
+    the safe direction: an overestimate slows the run, an underestimate gets a 413.
+    """
+    chars = sum(len(str(m.get("content", ""))) for m in params.get("messages", []))
+    return chars // 4 + int(params.get("max_tokens", 0))
+
+
+def _drop_expired(now: float) -> int:
+    global _spent
+    _spent = [(t, n) for t, n in _spent if now - t < _TPM_WINDOW]
+    return sum(n for _, n in _spent)
+
+
+def _wait_for(cost: int, used: int, limit: int, now: float) -> float:
+    """Seconds until enough of the window has rolled off to fit this call."""
+    if not _spent:
+        return 0.0
+    need = used + cost - limit
+    freed = 0
+    for t, n in sorted(_spent):
+        freed += n
+        if freed >= need:
+            return max(0.0, _TPM_WINDOW - (now - t)) + 0.25
+    return _TPM_WINDOW
+
+
+async def _reserve_async(params: dict) -> None:
+    limit = _tpm_limit()
+    if not limit:
+        return
+    cost = _estimate_tokens(params)
+    while True:
+        async with _tpm_lock:
+            now = time.monotonic()
+            used = _drop_expired(now)
+            if cost > limit:
+                # Nothing will ever make room for this. Let it go and let the provider
+                # say so, rather than sleeping forever on a request that cannot fit.
+                logger.warning(
+                    f"request needs ~{cost} tokens, over the whole {limit} TPM budget — sending anyway"
+                )
+                return
+            if used + cost <= limit:
+                _spent.append((now, cost))
+                return
+            delay = _wait_for(cost, used, limit, now)
+        logger.info(f"TPM budget: {used}/{limit} used, waiting {delay:.1f}s for ~{cost} tokens")
+        await asyncio.sleep(delay)
+
+
+def _reserve_sync(params: dict) -> None:
+    limit = _tpm_limit()
+    if not limit:
+        return
+    cost = _estimate_tokens(params)
+    while True:
+        with _tpm_lock_sync:
+            now = time.monotonic()
+            used = _drop_expired(now)
+            if cost > limit or used + cost <= limit:
+                _spent.append((now, cost))
+                return
+            delay = _wait_for(cost, used, limit, now)
+        time.sleep(delay)
+
+
 async def achat(params: dict):
     """Async chat completion with automatic fallback if the model name is invalid."""
+    await _reserve_async(params)
     client = get_async_client()
     try:
         resp = await client.chat.completions.create(**params)
@@ -295,6 +388,7 @@ async def achat(params: dict):
 
 def chat(params: dict):
     """Sync chat completion with automatic fallback if the model name is invalid."""
+    _reserve_sync(params)
     client = get_sync_client()
     try:
         resp = client.chat.completions.create(**params)

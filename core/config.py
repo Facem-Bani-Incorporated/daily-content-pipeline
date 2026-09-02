@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     # own completion limit on Groq; gpt-oss will refuse a ceiling it cannot honour.
     AI_MAX_COMPLETION_TOKENS: int = 40960
 
+    # Tokens per minute the account is allowed. Groq counts input + max_tokens against
+    # this and refuses the whole request with a 413 rather than queueing it, so the
+    # client paces itself in core/llm.py. 8000 is the free tier; raise it with the tier.
+    # 0 disables pacing entirely.
+    AI_TPM_LIMIT: int = 8000
+
     # The only API key the pipeline needs.
     GROQ_API_KEY: Optional[str] = None
     CLOUDINARY_CLOUD_NAME: str

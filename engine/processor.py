@@ -220,8 +220,9 @@ CRITICAL RULES:
 2. WIKIPEDIA: "slug" MUST be the exact Wikipedia article title.
 3. YEAR ACCURACY: Exact year of the event.
 4. NO HALLUCINATIONS: If unsure, EXCLUDE. Accuracy always beats volume.
-5. QUANTITY: Return as MANY accurate events as you can find — aim for 60+.
-   Cast a wide net across all of world history for this exact day.
+5. QUANTITY: Aim for 25 accurate events. That is already several times what a day
+   publishes, so it leaves room for the date validator to reject some — but asking
+   for 60+ only bought a longer response to throw away.
 6. DIVERSITY: Different centuries, regions, categories.
 7. DEPTH OVER FAME: if there aren't many globally famous events on this date,
    dig deeper instead of giving up — include well-documented but lesser-known
@@ -250,7 +251,12 @@ ALLOWED CATEGORIES: {self.categories_list}
 ONLY HIGH confidence.
 """
 
-        res = await self._safe_ai_call(prompt, f"Discovery ({date_str})", {"events": []})
+        # 3072, not the 4096 default: Groq bills input + max_tokens against the
+        # per-minute budget, and this prompt's ~4.5k of input leaves only so much room
+        # under an 8000 TPM tier. Twenty-five events fit in well under 3k of JSON.
+        res = await self._safe_ai_call(
+            prompt, f"Discovery ({date_str})", {"events": []}, max_tokens=3072
+        )
         events = res.get("events", [])
 
         validated = []
@@ -319,7 +325,7 @@ ALLOWED: {pro_cats}
 """
 
         res = await self._safe_ai_call(
-            prompt, f"PRO Discovery ({date_str})", {"events": []}
+            prompt, f"PRO Discovery ({date_str})", {"events": []}, max_tokens=3072
         )
         events = res.get("events", [])
 
