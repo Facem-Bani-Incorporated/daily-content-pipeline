@@ -622,10 +622,26 @@ CANDIDATES:
 
         async def process_single(idx, item):
             style = style_assignments[idx]
-            lang_results = await asyncio.gather(*[
-                self._fetch_narrative_lang(idx, item, lang, date_str, style)
-                for lang in self.languages
+            # Write once, translate four times.
+            #
+            # This used to generate all five languages from scratch, which meant the
+            # full instruction block — lens, voice, tone, format — was re-sent five
+            # times per event to produce the same article in five languages. It also
+            # let the facts drift: five independent generations from the same seed are
+            # five slightly different articles, not one article in five languages.
+            # deep_dive.py and parallel.py already work this way; this brings the
+            # narratives in line.
+            en_result = await self._fetch_narrative_lang(idx, item, "en", date_str, style)
+            english = {
+                "content": en_result[1],
+                "notification_title": (en_result[2] or {}).get("title", ""),
+                "notification_body": (en_result[2] or {}).get("body", ""),
+            }
+            translated = await asyncio.gather(*[
+                self._translate_narrative(idx, english, lang)
+                for lang in self.languages if lang != "en"
             ])
+            lang_results = [en_result] + [t for t in translated if t]
             # Each result is (lang, content, notification{title,body}).
             # Narrative text goes into the results map; the per-language notification
             # hook is stashed on the item so _build_event_details can attach it.
@@ -645,6 +661,52 @@ CANDIDATES:
         )
         self._audit_opening_diversity(results)
         return results
+
+    async def _translate_narrative(self, idx: int, english: dict, lang: str) -> tuple | None:
+        """Carry one finished article into another language.
+
+        Sent as a single JSON payload rather than field by field: three round trips
+        per language buys nothing, and the notification hook translates better when
+        the model can see the article it belongs to."""
+        lang_names = {"ro": "Romanian", "es": "Spanish", "de": "German", "fr": "French"}
+        lang_full = lang_names.get(lang, lang.upper())
+
+        prompt = f"""
+Translate this article into {lang_full}.
+
+Keep the voice: the rhythm, the short sentences, the dry irony, the paragraph breaks.
+Do not smooth it into textbook prose, do not summarise, do not add or drop anything.
+If the English uses a fragment for impact, keep the fragment. Numbers stay as digits.
+Proper nouns take their standard {lang_full} form.
+
+The notification is a push hook, not a headline — translate its pull, not its words.
+Hard limits: title MAX 40 characters, body MAX 120 characters, in {lang_full}.
+
+ARTICLE:
+{english["content"]}
+
+NOTIFICATION TITLE: {english["notification_title"]}
+NOTIFICATION BODY: {english["notification_body"]}
+
+Return JSON only:
+{{
+  "content": "the full article in {lang_full}, paragraphs separated by blank lines",
+  "notification_title": "<=40 chars in {lang_full}",
+  "notification_body": "<=120 chars in {lang_full}"
+}}
+"""
+        res = await self._safe_ai_call(
+            prompt, f"Narrative translate {idx} -> {lang}", {}, thinking_budget=0
+        )
+        content = (res or {}).get("content", "")
+        if not content:
+            logger.warning(f"⚠️ Narrative translation to {lang} came back empty (event {idx})")
+            return None
+        notif = self._clean_notification(
+            (res or {}).get("notification_title", ""),
+            (res or {}).get("notification_body", ""),
+        )
+        return lang, content, notif
 
     def _assign_narrative_styles(self, items: list) -> list:
         """

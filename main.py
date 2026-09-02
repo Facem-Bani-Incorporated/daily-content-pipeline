@@ -1366,8 +1366,23 @@ def _cli_arg(name: str, default: str | None = None) -> str | None:
     return default
 
 
+def _print_cost_report() -> None:
+    """What the run actually cost, per stage, most expensive first.
+
+    Printed unconditionally: the bill is the one number nobody looks at until it
+    is too big, and by then there is no record of which stage grew."""
+    try:
+        from core.llm import cost_report
+        logger.info(cost_report())
+    except Exception as e:  # never let accounting sink a finished run
+        logger.warning(f"cost report unavailable: {e!r}")
+
+
 if __name__ == "__main__":
     import sys
+    import atexit
+
+    atexit.register(_print_cost_report)
 
     if "--backfill-deepdive" in sys.argv:
         _from = _cli_arg("--from")

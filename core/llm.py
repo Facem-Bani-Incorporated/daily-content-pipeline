@@ -13,6 +13,7 @@ Call sites keep passing the old Anthropic-style inputs (`system`, `prompt`,
 
 import json
 import re
+import traceback
 
 from json_repair import repair_json
 from openai import OpenAI, AsyncOpenAI
@@ -294,16 +295,91 @@ def _fallback_model() -> str:
     return _FALLBACK_MODEL.get(_provider_name(), FALLBACK_MODEL)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# COST METER
+# ══════════════════════════════════════════════════════════════════════════════
+# Every call goes through achat/chat, so this is the one place that can answer
+# "where does the daily bill actually go". Without it the only way to cut cost is
+# to guess which stage is expensive, and guessing is how you spend a day cutting
+# the wrong thing.
+#
+# Prices are per 1M tokens, Gemini Flash pay-as-you-go. Thinking tokens bill as
+# output, which is why a 2000-token reasoning budget on a 16k-token generation is
+# not a rounding error. Batch submissions are half price — see BATCH_DISCOUNT.
+_PRICE_PER_M = {"input": 0.30, "output": 2.50}
+BATCH_DISCOUNT = 0.5
+
+_usage: dict[str, dict] = {}
+
+
+def _stage_from_stack() -> str:
+    """Name the caller from the stack rather than from a global.
+
+    The pipeline fans out with asyncio.gather, so a module-level "current stage"
+    would only ever report whichever coroutine set it last. The stack is
+    per-coroutine and always right: walk outwards past this module and report the
+    first frame that belongs to the pipeline."""
+    try:
+        for fr in reversed(traceback.extract_stack()[:-2]):
+            path = fr.filename.replace("\\", "/")
+            if "/core/llm.py" in path:
+                continue
+            mod = path.rsplit("/", 1)[-1].replace(".py", "")
+            return f"{mod}:{fr.name}"
+    except Exception:
+        pass
+    return "unattributed"
+
+
+def _record(resp) -> None:
+    try:
+        u = getattr(resp, "usage", None)
+        if not u:
+            return
+        row = _usage.setdefault(_stage_from_stack(), {"calls": 0, "in": 0, "out": 0})
+        row["calls"] += 1
+        row["in"] += getattr(u, "prompt_tokens", 0) or 0
+        row["out"] += getattr(u, "completion_tokens", 0) or 0
+    except Exception:
+        pass  # accounting must never break a run
+
+
+def cost_report() -> str:
+    """A per-stage breakdown, most expensive first."""
+    if not _usage:
+        return "no LLM usage recorded"
+    rows = []
+    total = 0.0
+    for stage, r in _usage.items():
+        cost = (r["in"] * _PRICE_PER_M["input"] + r["out"] * _PRICE_PER_M["output"]) / 1_000_000
+        total += cost
+        rows.append((cost, stage, r))
+    rows.sort(reverse=True, key=lambda x: x[0])
+    out = ["", "═" * 74, f"{'STAGE':<28}{'CALLS':>7}{'IN':>12}{'OUT':>12}{'USD':>10}{'%':>6}", "─" * 74]
+    for cost, stage, r in rows:
+        pct = (cost / total * 100) if total else 0
+        out.append(f"{stage:<28}{r['calls']:>7}{r['in']:>12,}{r['out']:>12,}{cost:>10.4f}{pct:>5.0f}%")
+    out.append("─" * 74)
+    out.append(f"{'TOTAL':<28}{'':>7}{'':>12}{'':>12}{total:>10.4f}")
+    out.append(f"{'same run on Batch API':<28}{'':>7}{'':>12}{'':>12}{total * BATCH_DISCOUNT:>10.4f}")
+    out.append("═" * 74)
+    return chr(10).join(out)
+
+
 async def achat(params: dict):
     """Async chat completion with automatic fallback if the model name is invalid."""
     client = get_async_client()
     try:
-        return await client.chat.completions.create(**params)
+        resp = await client.chat.completions.create(**params)
+        _record(resp)
+        return resp
     except Exception as e:
         fb = _fallback_model()
         if _is_model_missing(e) and params.get("model") != fb:
             logger.warning(f"⚠️ model {params.get('model')!r} unavailable → retrying with {fb}")
-            return await client.chat.completions.create(**{**params, "model": fb})
+            resp = await client.chat.completions.create(**{**params, "model": fb})
+            _record(resp)
+            return resp
         raise
 
 
@@ -311,12 +387,16 @@ def chat(params: dict):
     """Sync chat completion with automatic fallback if the model name is invalid."""
     client = get_sync_client()
     try:
-        return client.chat.completions.create(**params)
+        resp = client.chat.completions.create(**params)
+        _record(resp)
+        return resp
     except Exception as e:
         fb = _fallback_model()
         if _is_model_missing(e) and params.get("model") != fb:
             logger.warning(f"⚠️ model {params.get('model')!r} unavailable → retrying with {fb}")
-            return client.chat.completions.create(**{**params, "model": fb})
+            resp = client.chat.completions.create(**{**params, "model": fb})
+            _record(resp)
+            return resp
         raise
 
 
