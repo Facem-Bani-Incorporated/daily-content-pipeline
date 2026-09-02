@@ -45,8 +45,10 @@ logger = setup_logger("MainPipeline")
 # 7 secondary (4 FREE + 3 PRO). Totals: FREE = 5, PRO = 4. The main/secondary split is
 # derived on the client from impact_score ordering, not stored — the pipeline just
 # produces the right counts.
-TARGET_FREE_COUNT = 5
-TARGET_PRO_COUNT = 4  # 1 personalities + 1 media + 1 sport + 1 extra (best-of-the-rest)
+# 2 for the main screen + 2 in discovery. Down from 5 in Sept 2026: every per-event
+# cost — narrative, translations, quiz, long read — multiplies by this number.
+TARGET_FREE_COUNT = 4
+TARGET_PRO_COUNT = 2  # 2 in discovery. Was 4 (personalities, media, sport, best-of-rest).
 
 # How many events per tier get a Parallel Universes game. Two: the game now has its own
 # tab rather than living at the bottom of one story, and a hub with a single entry is not
@@ -68,8 +70,8 @@ TARGET_PRO_COUNT = 4  # 1 personalities + 1 media + 1 sport + 1 extra (best-of-t
 PARALLEL_PER_TIER = 1
 
 # Minimum acceptable count before we fall back to non-validated events
-MIN_FREE_COUNT = 5
-MIN_PRO_COUNT = 4
+MIN_FREE_COUNT = 3
+MIN_PRO_COUNT = 2
 
 # Minimum final_score (0-100) for a NEW event to be accepted in refresh mode.
 # New events below this threshold are considered low-relevance and are replaced
