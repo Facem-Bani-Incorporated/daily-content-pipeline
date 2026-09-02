@@ -16,8 +16,12 @@ import re
 import sys
 from pathlib import Path
 
-PRICE_IN = 0.30 / 1_000_000   # Gemini Flash, per token
-PRICE_OUT = 2.50 / 1_000_000  # reasoning tokens bill at this rate too
+# Groq, gpt-oss-120b. CHECK THESE against Groq's pricing page before trusting a
+# number that comes out of here — they are the only hand-entered figures in the file.
+# For reference, the Gemini Flash rates this replaced were 0.30 / 2.50, and the bulk
+# of that bill arrived on a separate "Thinking On" output SKU that Groq does not have.
+PRICE_IN = 0.15 / 1_000_000
+PRICE_OUT = 0.75 / 1_000_000
 BATCH_DISCOUNT = 0.5
 
 

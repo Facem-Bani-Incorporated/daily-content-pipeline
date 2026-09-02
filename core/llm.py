@@ -23,10 +23,10 @@ from core.logger import setup_logger
 
 logger = setup_logger("LLM")
 
-# A maintained Gemini alias that is always valid. If AI_MODEL is a typo (e.g.
-# "gemini-3.5-flas") or a retired model, the call 404s and we transparently retry
-# on this so the pipeline can't be broken by a bad env value.
-FALLBACK_MODEL = "gemini-flash-latest"
+# A model that is always valid on the default provider. If AI_MODEL is a typo or a
+# retired name, the call 404s and we transparently retry on this, so the pipeline
+# cannot be broken by one bad env value.
+FALLBACK_MODEL = "openai/gpt-oss-20b"
 
 # Per-provider wiring. `reasoning` = whether the model accepts `reasoning_effort`;
 # `idle_effort` = the effort value for non-reasoning (creative) calls.
@@ -105,13 +105,15 @@ def _has_credentials(name: str) -> bool:
 
 
 def _autodetect_provider() -> str:
-    """Pick a provider from whatever credentials are actually present."""
-    if _has_credentials("vertex"):
-        return "vertex"
-    for name in ("gemini", "openai", "groq"):
+    """Pick a provider from whatever credentials are actually present.
+
+    Groq first, and Groq as the floor. Vertex used to win this race on the strength
+    of a service account being present, which meant a leftover Google credential
+    quietly kept billing Cloud after the project had moved off it."""
+    for name in ("groq", "openai", "gemini", "vertex"):
         if _has_credentials(name):
             return name
-    return "gemini"
+    return "groq"
 
 
 def _provider_name() -> str:
@@ -141,7 +143,7 @@ def log_config_diagnostics() -> None:
 
 
 def _provider() -> dict:
-    return _PROVIDERS.get(_provider_name(), _PROVIDERS["gemini"])
+    return _PROVIDERS.get(_provider_name(), _PROVIDERS["groq"])
 
 
 def _load_service_account_info() -> dict:

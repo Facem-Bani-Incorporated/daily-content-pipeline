@@ -4,8 +4,8 @@ from pydantic import ConfigDict, field_validator
 
 # Default LLM provider + model. All providers below speak the OpenAI-compatible API,
 # so the pipeline talks to one client (core/llm.py) and only these env vars change.
-DEFAULT_PROVIDER = "gemini"
-DEFAULT_MODEL = "gemini-3.5-flash"
+DEFAULT_PROVIDER = "groq"
+DEFAULT_MODEL = "openai/gpt-oss-120b"
 
 
 class Settings(BaseSettings):
@@ -79,17 +79,19 @@ class Settings(BaseSettings):
     @field_validator("AI_MODEL", mode="before")
     @classmethod
     def force_supported_model(cls, v: Optional[str]) -> str:
-        # A stale AI_MODEL env var from a previous provider (e.g. a leftover
-        # "claude-haiku-4-5" or "openai/gpt-oss-120b" in Railway) would override the
-        # code default and break every call. Coerce any known-foreign model — or an
-        # empty value — back to the current default so env can't silently break it.
+        # A stale AI_MODEL from a previous provider would be sent to the current one,
+        # which rejects it on every call. Coerce the clearly-foreign names back to the
+        # default so a leftover Railway variable cannot silently break a run.
+        #
+        # This list is the wrong way round if you switch providers and forget it: it
+        # used to coerce "openai/gpt-oss*", which meant setting the Groq model in env
+        # silently put you back on Gemini. Whatever the current default is, the names
+        # coerced here must be the *other* providers'.
         if not v:
             return DEFAULT_MODEL
         low = str(v).lower()
-        # Only coerce clearly-foreign models from a previous provider. Retired Gemini
-        # names are left alone (Vertex uses different naming, and the runtime fallback
-        # in core/llm.py recovers from a 404 on AI Studio).
-        if low.startswith("claude") or low.startswith("openai/gpt-oss") or "haiku" in low:
+        foreign = ("claude", "haiku", "gemini", "google/", "gpt-4", "gpt-3")
+        if any(low.startswith(f) or f in low for f in foreign):
             return DEFAULT_MODEL
         return v
 
