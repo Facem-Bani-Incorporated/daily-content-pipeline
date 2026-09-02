@@ -28,61 +28,21 @@ logger = setup_logger("LLM")
 # cannot be broken by one bad env value.
 FALLBACK_MODEL = "openai/gpt-oss-20b"
 
-# Per-provider wiring. `reasoning` = whether the model accepts `reasoning_effort`;
-# `idle_effort` = the effort value for non-reasoning (creative) calls.
+# Groq is the only provider. The multi-provider table this replaced carried Gemini,
+# OpenAI and Vertex, and every one of them was a way to accidentally keep billing
+# Google after the project had moved off it.
 #
-# This was "low", on the reasoning that low is accepted everywhere and keeps cost
-# minimal. It does not: "low" still thinks, and thinking bills as output. Cloud
-# Billing shows it on its own line — "Gemini 2.5 Flash GA Text Output (Thinking On)"
-# — and that line was the single largest item on the invoice. Creative and mechanical
-# calls (writing an article, translating one) gain nothing from deliberation, and
-# there are far more of those than there are ranking calls.
-#
-# So: "none", with _EFFORT_FALLBACK below covering the models that reject it.
-_PROVIDERS = {
-    "gemini": {
-        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-        "key_attrs": ("GEMINI_API_KEY", "OPENAI_API_KEY"),
-        "reasoning": True,
-        "idle_effort": "none",
-        "json_mode": True,  # Gemini's json_object mode is reliable → guaranteed-valid JSON
-    },
-    "openai": {
-        "base_url": None,  # SDK default (api.openai.com)
-        "key_attrs": ("OPENAI_API_KEY",),
-        "reasoning": False,  # gpt-4o-mini etc. reject reasoning_effort
-        "idle_effort": None,
-        "json_mode": True,
-    },
-    "groq": {
-        "base_url": "https://api.groq.com/openai/v1",
-        "key_attrs": ("GROQ_API_KEY",),
-        "reasoning": True,
-        "idle_effort": "low",
-        "json_mode": False,  # gpt-oss constrained decoding returns empty/invalid — use lenient parse
-    },
-    # Google Cloud Vertex AI — same Gemini models, billed via Cloud Billing (POSTPAID).
-    # base_url is built from GCP_PROJECT/GCP_LOCATION and auth is a short-lived OAuth
-    # token minted from the service account (not a static API key). Models are addressed
-    # as "google/<model>".
-    "vertex": {
-        "base_url": None,  # built dynamically in _base_url()
-        "key_attrs": (),   # token minted in _resolve_key()
-        "reasoning": True,
-        "idle_effort": "none",
-        "json_mode": True,
-        "vertex": True,
-    },
-}
-
-# Provider-appropriate fallback model when AI_MODEL is invalid/retired (used by achat/chat).
-_FALLBACK_MODEL = {
-    "gemini": "gemini-flash-latest",
-    "vertex": "google/gemini-2.5-flash",
-    "openai": "gpt-4o-mini",
-    # Must be a model the account can actually reach: the fallback fires exactly when
-    # AI_MODEL is wrong, so pointing it at something retired turns a typo into a dead run.
-    "groq": "openai/gpt-oss-20b",
+# `reasoning`: gpt-oss accepts reasoning_effort. `idle_effort`: what the creative and
+# mechanical calls get — writing an article or translating one gains nothing from
+# deliberation, and reasoning tokens bill as output.
+# `json_mode` is off: gpt-oss constrained decoding returns empty or invalid output,
+# so a strict system prompt plus lenient parsing does the job instead.
+_GROQ = {
+    "base_url": "https://api.groq.com/openai/v1",
+    "key_attr": "GROQ_API_KEY",
+    "reasoning": True,
+    "idle_effort": "low",
+    "json_mode": False,
 }
 
 # The SDK retries 429s automatically, honouring the provider's retry-after header.
@@ -97,121 +57,34 @@ _async_client = None
 _sync_client = None
 
 
-def _has_credentials(name: str) -> bool:
-    prov = _PROVIDERS[name]
-    if prov.get("vertex"):
-        return bool(getattr(config, "GOOGLE_SERVICE_ACCOUNT_JSON", None) and getattr(config, "GCP_PROJECT", None))
-    return any(getattr(config, a, None) for a in prov["key_attrs"])
-
-
-def _autodetect_provider() -> str:
-    """Pick a provider from whatever credentials are actually present.
-
-    Groq first, and Groq as the floor. Vertex used to win this race on the strength
-    of a service account being present, which meant a leftover Google credential
-    quietly kept billing Cloud after the project had moved off it."""
-    for name in ("groq", "openai", "gemini", "vertex"):
-        if _has_credentials(name):
-            return name
-    return "groq"
-
-
-def _provider_name() -> str:
-    # Honour an explicit AI_PROVIDER (strip() guards a pasted "vertex " value) — but only
-    # if that provider actually has credentials. Otherwise auto-detect from what's set.
-    # This rescues the common case: AI_PROVIDER left on "gemini" after the gemini key was
-    # deleted, with a Vertex service account present → use Vertex.
-    name = str(getattr(config, "AI_PROVIDER", "") or "").strip().lower()
-    if name in _PROVIDERS and _has_credentials(name):
-        return name
-    return _autodetect_provider()
+def _provider() -> dict:
+    return _GROQ
 
 
 def log_config_diagnostics() -> None:
-    """One-shot log of which LLM-related env vars actually reached the app — so a
-    mangled variable name in the host shows up instead of silently defaulting."""
-    def present(attr):
-        return "set" if getattr(config, attr, None) else "MISSING"
+    """One-shot log of which LLM env vars actually reached the app, so a mangled
+    variable name in the host shows up instead of silently defaulting."""
+    key = "set" if getattr(config, "GROQ_API_KEY", None) else "MISSING"
     logger.info(
-        "🔎 LLM env → "
-        f"AI_PROVIDER={str(getattr(config, 'AI_PROVIDER', None))!r} "
-        f"GCP_PROJECT={str(getattr(config, 'GCP_PROJECT', None))!r} "
-        f"SERVICE_ACCOUNT={present('GOOGLE_SERVICE_ACCOUNT_JSON')} "
-        f"GEMINI_KEY={present('GEMINI_API_KEY')} "
-        f"→ resolved provider={_provider_name()}"
+        f"LLM env -> provider=groq model={str(getattr(config, 'AI_MODEL', None))!r} "
+        f"GROQ_API_KEY={key}"
     )
 
 
-def _provider() -> dict:
-    return _PROVIDERS.get(_provider_name(), _PROVIDERS["groq"])
-
-
-def _load_service_account_info() -> dict:
-    """Parse the service account credentials from GOOGLE_SERVICE_ACCOUNT_JSON.
-
-    Accepts either the raw JSON or a base64-encoded JSON. base64 is the safe way to set
-    it in a hosting UI (Railway): a single line with no quotes/newlines/`=` that would
-    otherwise be mis-split into stray, empty-named variables.
-    """
-    raw = getattr(config, "GOOGLE_SERVICE_ACCOUNT_JSON", None)
-    if not raw:
-        raise RuntimeError("AI_PROVIDER=vertex needs GOOGLE_SERVICE_ACCOUNT_JSON (raw JSON or base64).")
-    raw = raw.strip()
-    if not raw.startswith("{"):
-        import base64
-        raw = base64.b64decode(raw).decode("utf-8")
-    return json.loads(raw)
-
-
-def _vertex_token() -> str:
-    """Mint a short-lived OAuth token from the service account JSON for Vertex AI."""
-    from google.oauth2 import service_account
-    from google.auth.transport.requests import Request as GAuthRequest
-
-    info = _load_service_account_info()
-    creds = service_account.Credentials.from_service_account_info(
-        info, scopes=["https://www.googleapis.com/auth/cloud-platform"]
-    )
-    creds.refresh(GAuthRequest())
-    return creds.token
-
-
-def _resolve_key(prov: dict) -> str:
-    if prov.get("vertex"):
-        return _vertex_token()
-    for attr in prov["key_attrs"]:
-        key = getattr(config, attr, None)
-        if key:
-            return key
-    raise RuntimeError(
-        f"No API key set for provider '{config.AI_PROVIDER}'. "
-        f"Set one of: {', '.join(prov['key_attrs'])}."
-    )
-
-
-def _base_url(prov: dict):
-    override = getattr(config, "AI_BASE_URL", None)
-    if override:
-        return override
-    if prov.get("vertex"):
-        project = getattr(config, "GCP_PROJECT", None)
-        location = getattr(config, "GCP_LOCATION", None) or "global"
-        if not project:
-            raise RuntimeError("AI_PROVIDER=vertex needs GCP_PROJECT.")
-        host = "aiplatform.googleapis.com" if location == "global" else f"{location}-aiplatform.googleapis.com"
-        return f"https://{host}/v1beta1/projects/{project}/locations/{location}/endpoints/openapi"
-    return prov["base_url"]
+def _resolve_key() -> str:
+    key = getattr(config, "GROQ_API_KEY", None)
+    if not key:
+        raise RuntimeError("GROQ_API_KEY is not set.")
+    return str(key)
 
 
 def get_async_client() -> AsyncOpenAI:
     global _async_client
     if _async_client is None:
         log_config_diagnostics()
-        prov = _provider()
-        base = _base_url(prov)
-        logger.info(f"🤖 LLM client → provider={_provider_name()} model={config.AI_MODEL} base_url={base}")
+        logger.info(f"LLM client -> groq model={config.AI_MODEL} base_url={_GROQ['base_url']}")
         _async_client = AsyncOpenAI(
-            api_key=_resolve_key(prov), base_url=base, timeout=600.0, max_retries=_MAX_RETRIES,
+            api_key=_resolve_key(), base_url=_GROQ["base_url"], timeout=600.0, max_retries=_MAX_RETRIES,
         )
     return _async_client
 
@@ -220,11 +93,9 @@ def get_sync_client() -> OpenAI:
     global _sync_client
     if _sync_client is None:
         log_config_diagnostics()
-        prov = _provider()
-        base = _base_url(prov)
-        logger.info(f"🤖 LLM client → provider={_provider_name()} model={config.AI_MODEL} base_url={base}")
+        logger.info(f"LLM client -> groq model={config.AI_MODEL} base_url={_GROQ['base_url']}")
         _sync_client = OpenAI(
-            api_key=_resolve_key(prov), base_url=base, timeout=600.0, max_retries=_MAX_RETRIES,
+            api_key=_resolve_key(), base_url=_GROQ["base_url"], timeout=600.0, max_retries=_MAX_RETRIES,
         )
     return _sync_client
 
@@ -264,9 +135,6 @@ def build_params(
     messages.append({"role": "user", "content": prompt})
 
     model = str(model).strip()
-    # Vertex addresses Gemini models as "google/<model>".
-    if prov.get("vertex") and not model.startswith("google/"):
-        model = f"google/{model}"
 
     effort = _reasoning_effort(prov, thinking_budget)
 
@@ -325,7 +193,7 @@ def _is_model_missing(err: Exception) -> bool:
 
 
 def _fallback_model() -> str:
-    return _FALLBACK_MODEL.get(_provider_name(), FALLBACK_MODEL)
+    return FALLBACK_MODEL
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -336,10 +204,11 @@ def _fallback_model() -> str:
 # to guess which stage is expensive, and guessing is how you spend a day cutting
 # the wrong thing.
 #
-# Prices are per 1M tokens, Gemini Flash pay-as-you-go. Thinking tokens bill as
-# output, which is why a 2000-token reasoning budget on a 16k-token generation is
-# not a rounding error. Batch submissions are half price — see BATCH_DISCOUNT.
-_PRICE_PER_M = {"input": 0.30, "output": 2.50}
+# Prices are per 1M tokens. Reasoning tokens bill as output, which is why effort
+# settings show up on the invoice rather than just in latency.
+# Groq, gpt-oss-120b. Verify against Groq's pricing page — these are the only
+# hand-entered numbers in the meter.
+_PRICE_PER_M = {"input": 0.15, "output": 0.75}
 BATCH_DISCOUNT = 0.5
 
 _usage: dict[str, dict] = {}

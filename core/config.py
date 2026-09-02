@@ -16,18 +16,13 @@ class Settings(BaseSettings):
     USER_AGENT: str = "DailyHistoryApp/2.0 (contact@yourdomain.com)"
 
     # ── LLM provider ────────────────────────────────────────────────
-    # AI_PROVIDER selects which OpenAI-compatible backend core/llm.py talks to:
-    # "gemini" (AI Studio key), "vertex" (Google Cloud, POSTPAID), "openai", or "groq".
+    # Groq only. The pipeline ran on Gemini via Vertex until Sept 2026, when Google
+    # blocked the project over billing mid-run and every call came back 403. Keeping
+    # the other providers around was mostly a way to end up back on one of them by
+    # accident, so they are gone.
     AI_PROVIDER: str = DEFAULT_PROVIDER
     AI_MODEL: str = DEFAULT_MODEL
     AI_BASE_URL: Optional[str] = None  # override the provider's default base URL if ever needed
-
-    # Vertex AI (AI_PROVIDER="vertex") — billed via Google Cloud = pay-at-month-end.
-    # Needs a GCP project with Vertex AI API enabled + billing linked, and a service
-    # account JSON (paste the whole JSON string into GOOGLE_SERVICE_ACCOUNT_JSON).
-    GCP_PROJECT: Optional[str] = None
-    GCP_LOCATION: str = "global"
-    GOOGLE_SERVICE_ACCOUNT_JSON: Optional[str] = None
 
     # Legacy "thinking budget" lever, kept for call-site compatibility. It no longer sets
     # a token budget; it only flags which calls are accuracy-critical (budget > 0 →
@@ -56,14 +51,12 @@ class Settings(BaseSettings):
     # looks like a short answer rather than a clipped one, and every tree was rejected as
     # too small. gemini-2.5-flash allows 65535 out; this leaves headroom without inviting
     # runaway generations. Callers still pass their own max_tokens — this only stops the
-    # ones that legitimately need room from being clipped.
+    # ones that legitimately need room from being clipped. Check this against the model's
+    # own completion limit on Groq; gpt-oss will refuse a ceiling it cannot honour.
     AI_MAX_COMPLETION_TOKENS: int = 40960
 
-    # API Keys — set the one matching AI_PROVIDER
-    GEMINI_API_KEY: Optional[str] = None
-    OPENAI_API_KEY: Optional[str] = None
+    # The only API key the pipeline needs.
     GROQ_API_KEY: Optional[str] = None
-    ANTHROPIC_API_KEY: Optional[str] = None  # legacy — no longer used
     CLOUDINARY_CLOUD_NAME: str
     CLOUDINARY_API_KEY: str
     CLOUDINARY_API_SECRET: str
