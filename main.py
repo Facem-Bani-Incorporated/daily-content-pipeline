@@ -25,6 +25,7 @@ from schema.models import (
     Translations,
     DeepDive,
     DeepDiveChapter,
+    DeepDiveHighlight,
     DeepDiveTranslations,
     Actor,
     ChoiceOutcome,
@@ -262,6 +263,16 @@ def _deep_dive_from_db(raw) -> DeepDiveTranslations | None:
                     for c in entry.get("chapters", [])
                     if isinstance(c, dict)
                 ],
+                # Rows written before highlights existed simply have none, and the app
+                # renders the section only when it is non-empty.
+                highlights=[
+                    DeepDiveHighlight(
+                        label=str(h.get("label") or ""),
+                        text=str(h.get("text") or ""),
+                    )
+                    for h in entry.get("highlights", [])
+                    if isinstance(h, dict) and h.get("text")
+                ],
                 timeline=[str(x) for x in entry.get("timeline", [])],
                 misconception=str(entry.get("misconception") or ""),
                 aftermath=[str(x) for x in entry.get("aftermath", [])],
@@ -290,6 +301,7 @@ def _serialize_deep_dive(deep_dive) -> str | None:
             continue
         payload[lang] = {
             "chapters": [{"title": c.title, "body": c.body} for c in dd.chapters],
+            "highlights": [{"label": h.label, "text": h.text} for h in dd.highlights],
             "timeline": dd.timeline,
             "misconception": dd.misconception,
             "aftermath": dd.aftermath,
@@ -1081,6 +1093,7 @@ def _deep_dive_for_index(deep_dives_map: dict | None, idx: int) -> DeepDiveTrans
     return DeepDiveTranslations(**{
         lang: DeepDive(
             chapters=[DeepDiveChapter(**c) for c in payload["chapters"]],
+            highlights=[DeepDiveHighlight(**h) for h in payload.get("highlights", [])],
             timeline=payload["timeline"],
             misconception=payload["misconception"],
             aftermath=payload["aftermath"],

@@ -56,6 +56,10 @@ MAX_WORDS = 3200          # above this it is padding, not prose → retry
 MIN_CHAPTERS = 4
 MAX_CHAPTERS = 7
 MIN_CHAPTER_WORDS = 80
+# Points of interest shown above the article. Enough to be worth a glance, few enough
+# that they stay points rather than becoming a second article.
+MIN_HIGHLIGHTS = 3
+MAX_HIGHLIGHTS = 5
 MIN_SOURCES = 3
 TEASER_WORDS = 70         # opening words shipped to free users as the pitch
 MAX_OVERLAP = 0.12        # 8-gram overlap with the free narrative
@@ -154,7 +158,7 @@ class DeepDiveGenerator:
             )
 
             payload = self._normalize(res)
-            is_valid, reason = self._validate(payload, short_narrative)
+            is_valid, reason = self._validate(payload, short_narrative, attempt)
             if is_valid:
                 logger.info(
                     f"✅ DeepDive {idx}:en — {payload['word_count']} words, "
@@ -202,20 +206,45 @@ WHAT TO PRODUCE:
    not "Background". Each chapter does distinct work — set-up, mechanism, the moment,
    the people, the consequence. Never summarize the previous chapter.
 
-2. TIMELINE — 5 to 12 entries, each "MARKER — what happened". The marker is a real time,
+2. HIGHLIGHTS — {MIN_HIGHLIGHTS} to {MAX_HIGHLIGHTS} points of interest, read BEFORE the article as
+   the reason to bother with it. Each is {{"label": "...", "text": "..."}}: a 2-5 word label
+   and 25-45 words under it. One concrete fact, number, name or scene each — never a
+   summary of the chapter it came from.
+
+   THE LABELS DEPEND ON WHAT KIND OF EVENT THIS IS. Choose them yourself to fit the
+   subject; do not reuse a fixed set. What a reader wants to know about a person is not
+   what they want to know about a treaty. For example:
+
+   • A PERSON (born, died, or the subject) — what they actually did, in one line. What
+     they are genuinely known for, as opposed to what they are misremembered for. The
+     thing about them almost nobody knows. What was left behind.
+   • A RELIGIOUS OR DOCTRINAL EVENT — what was actually decided or happened on the day.
+     Who was in the room and who was excluded. What changed the following morning. What
+     is still being argued about because of it.
+   • A BATTLE, DISASTER OR CATASTROPHE — the scale in real numbers. The decision that
+     made it go this way rather than another. The detail that makes it human. Who paid.
+   • A TREATY, LAW OR FOUNDING — what problem it was supposed to solve. What it actually
+     did. Who won and who lost, named. Whether it held.
+   • A DISCOVERY, INVENTION OR FIRST — what existed before it and did not after. How it
+     actually worked, in plain words. Who else nearly got there first.
+
+   Those are illustrations, not a menu. A coronation, a premiere, a heist and an
+   expedition each want their own labels. Write the labels this event deserves.
+
+3. TIMELINE — 5 to 12 entries, each "MARKER — what happened". The marker is a real time,
    date or year ("14:32", "3 March 1848", "Spring 1919"). Tight, factual, sequential.
    This is the spine of the event, not a repeat of the chapters.
 
-3. MISCONCEPTION — 80-150 words on what most people get wrong about this event. The
+4. MISCONCEPTION — 80-150 words on what most people get wrong about this event. The
    popular version, then what actually happened, and why the wrong version stuck.
    If there is genuinely no popular misconception, write instead about the detail that
    is consistently left out of the retellings.
 
-4. AFTERMATH — 3 to 4 entries tracing consequences forward in time. Each begins with a
+5. AFTERMATH — 3 to 4 entries tracing consequences forward in time. Each begins with a
    time marker ("Within a decade", "By 1961", "Two centuries later"). Concrete effects
    on real people, institutions or places — not "it changed history".
 
-5. SOURCES — {MIN_SOURCES} to 5 real references as "Author, Title (Year)". Books, papers,
+6. SOURCES — {MIN_SOURCES} to 5 real references as "Author, Title (Year)". Books, papers,
    archives, published collections. NEVER invent a source. NEVER output a URL. If you
    are not confident a specific work exists, name the archive or the primary document
    type instead ("the Admiralty logs held at Kew").
@@ -241,6 +270,9 @@ Return JSON:
   "chapters": [
     {{"title": "chapter title", "body": "chapter text, blank lines between paragraphs"}}
   ],
+  "highlights": [
+    {{"label": "Why he is remembered", "text": "25-45 words, one concrete thing"}}
+  ],
   "timeline": ["14:32 — the first signal reaches Lisbon", "..."],
   "misconception": "80-150 words",
   "aftermath": ["Within a decade — ...", "..."],
@@ -258,6 +290,7 @@ Return JSON:
         # field by field would cost four times the requests for no gain in quality.
         payload = {
             "chapters": english["chapters"],
+            "highlights": english.get("highlights", []),
             "timeline": english["timeline"],
             "misconception": english["misconception"],
             "aftermath": english["aftermath"],
@@ -270,6 +303,7 @@ Keep the voice: the rhythm, the short punchy sentences, the dry irony. Do not sm
 into academic prose. If the English uses a fragment for impact, keep the fragment.
 All numbers stay as digits. Proper nouns take their standard {lang_full} form.
 Chapter titles stay hooks, not labels — translate their punch, not just their words.
+Highlight labels stay short — 2-5 words, the same promise the English one makes.
 Timeline and aftermath markers keep their format ("14:32 — ...", "By 1961 — ...").
 Blank lines between paragraphs are preserved exactly.
 Output only {lang_full} — no English except proper nouns.
@@ -348,8 +382,21 @@ Return the SAME JSON structure, with every string translated into {lang_full}:
                     out.append(entry)
             return out
 
+        highlights = []
+        for h in (res.get("highlights") or []):
+            if isinstance(h, dict):
+                label = str(h.get("label") or h.get("title") or "").strip()
+                text = str(h.get("text") or h.get("body") or h.get("value") or "").strip()
+            else:
+                # A bare string: keep it as the text and let the app show it unlabelled
+                # rather than throwing away a good point over its packaging.
+                label, text = "", str(h).strip()
+            if text:
+                highlights.append({"label": label, "text": text})
+
         payload = {
             "chapters": chapters,
+            "highlights": highlights[:MAX_HIGHLIGHTS],
             "timeline": _str_list("timeline"),
             "misconception": str(res.get("misconception") or "").strip(),
             "aftermath": _str_list("aftermath"),
@@ -376,8 +423,18 @@ Return the SAME JSON structure, with every string translated into {lang_full}:
             return chapters[0]["body"]
         return " ".join(words[:TEASER_WORDS]).rstrip(".,;:—-") + "…"
 
-    def _validate(self, payload: dict, short_narrative: str) -> tuple:
+    def _validate(self, payload: dict, short_narrative: str, attempt: int = 3) -> tuple:
         chapters = payload["chapters"]
+
+        # Highlights are worth one retry and no more. Rejecting a finished article
+        # because its points of interest came back thin would trade the thing readers
+        # came for against the thing that introduces it — and a long read that never
+        # ships helps nobody. So this gates the first attempt and is advisory after.
+        if len(payload.get("highlights", [])) < MIN_HIGHLIGHTS and attempt == 1:
+            return False, (
+                f"{len(payload.get('highlights', []))} highlights "
+                f"(want {MIN_HIGHLIGHTS}-{MAX_HIGHLIGHTS})"
+            )
 
         if not chapters:
             return False, "No chapters"

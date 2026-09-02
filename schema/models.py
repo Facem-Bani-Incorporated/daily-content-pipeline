@@ -72,6 +72,18 @@ class DeepDiveChapter(BaseModel):
     body: str
 
 
+class DeepDiveHighlight(BaseModel):
+    """One point of interest, shown above the article as the reason to read it.
+
+    The label is chosen per event rather than drawn from a fixed set: what a reader
+    wants to know about a person ("what he was actually known for") is not what they
+    want to know about a treaty ("whether it held"). Keeping it free text is what lets
+    one generator serve a coronation, a shipwreck and a schism.
+    """
+    label: str = ""
+    text: str = ""
+
+
 class DeepDive(BaseModel):
     """The long-form PRO narrative for one event, in one language.
 
@@ -81,6 +93,7 @@ class DeepDive(BaseModel):
     body text ever leaving the server.
     """
     chapters: List[DeepDiveChapter] = []
+    highlights: List[DeepDiveHighlight] = []   # points of interest, above the article
     timeline: List[str] = []      # "14:32 — the first signal reaches Lisbon"
     misconception: str = ""       # "what everyone gets wrong about this day"
     aftermath: List[str] = []     # consequences at +10y / +50y / +100y
