@@ -48,10 +48,15 @@ _GROQ = {
 # The SDK retries 429s automatically, honouring the provider's retry-after header.
 _MAX_RETRIES = 6
 
-# Minimum max_tokens for a medium/high reasoning call: on Gemini/Vertex the thinking
-# tokens come out of max_tokens, so discovery (long list + reasoning) needs headroom or
-# it truncates to empty/invalid JSON. Bounded by AI_MAX_COMPLETION_TOKENS.
-_REASONING_TOKEN_FLOOR = 12288
+# Gemini drew thinking tokens out of max_tokens, so a reasoning call needed a floor
+# under its ceiling or it truncated to empty JSON. Groq does not work that way, and
+# the floor actively hurt there: Groq counts max_tokens against the tokens-per-minute
+# budget, so reserving 12288 output tokens turned a ~4k discovery prompt into a 16.7k
+# request and it was refused outright on an 8k TPM tier.
+#
+# Kept at 0 rather than deleted because the call sites still pass thinking_budget and
+# the concept has to survive if a provider like that ever comes back.
+_REASONING_TOKEN_FLOOR = 0
 
 _async_client = None
 _sync_client = None
@@ -138,10 +143,7 @@ def build_params(
 
     effort = _reasoning_effort(prov, thinking_budget)
 
-    # On Gemini/Vertex, thinking tokens are drawn from max_tokens, so a reasoning call
-    # with a small budget truncates (empty/invalid output). Give medium/high effort a
-    # floor so the answer survives the thinking. Bounded by the hard cap below.
-    if effort in ("medium", "high"):
+    if _REASONING_TOKEN_FLOOR and effort in ("medium", "high"):
         max_tokens = max(max_tokens, _REASONING_TOKEN_FLOOR)
 
     cap = int(getattr(config, "AI_MAX_COMPLETION_TOKENS", 16384))
