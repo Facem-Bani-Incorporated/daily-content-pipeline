@@ -351,6 +351,12 @@ CRITICAL RULES:
    deaths, cultural or sporting curiosities). A thin or empty list is a failure:
    always come back with a rich set of real events. Lesser-known is welcome;
    invented or misdated is not.
+8. INTERESTING, NOT MERELY DATED. Every candidate should be something you could tell
+   someone about in one sentence and have them want the second. Prefer the dramatic,
+   the surprising, the first-of-its-kind and the human over routine administrative
+   milestones — a department founded, a charter renewed, an office filled on schedule.
+   Obscure-but-gripping beats famous-but-procedural. Set ai_score accordingly: reserve
+   80+ for events with a real story, and score dutiful institutional entries below 50.
 {otd_block}{avoid_block}
 STRICT JSON SCHEMA:
 {{
@@ -702,21 +708,29 @@ You are a rigorous historian curating a "Today in History" feed for {date_str}.
 From the CANDIDATES below, select and rank the 15 most significant events.
 
 Reason through each candidate before scoring it. Score on five components:
-  • GLOBAL REACH (0–30) — did it affect the whole world, or just one region?
-  • PERMANENCE (0–25) — are the consequences still felt today?
-  • UNIVERSAL RECOGNITION (0–20) — would an educated person anywhere recognize it?
-  • EMOTIONAL POWER (0–15) — human drama, stakes, a story worth telling.
-  • UNIQUENESS (0–5) — a real "first" or turning point, not a routine occurrence.
+  • STORY POWER (0–30) — is there drama here? Stakes, a reversal, a decision taken
+    under pressure, a human being one can picture. Would a reader stop scrolling?
+  • PERMANENCE (0–20) — are the consequences still felt today?
+  • GLOBAL REACH (0–20) — did it affect the whole world, or just one region?
+  • UNIQUENESS (0–15) — a real first, a turning point, or something genuinely strange.
+    Routine institutional business scores zero here no matter how large the institution.
+  • UNIVERSAL RECOGNITION (0–15) — would an educated person anywhere recognize it?
 
 deep_score = the sum of those five components (0–100). Rank by deep_score, highest first.
 
 HARD RULES:
-  1. World-changing beats locally-important. A famous-but-regional event still loses
-     to a pivotal global one — significance, not mere name recognition.
-  2. DIVERSITY: the top 15 must span at least 3 different centuries AND 3 different
+  1. INTERESTING BEATS MERELY IMPORTANT. This is a feed people read for pleasure, not
+     a syllabus. A department being founded, a treaty being signed without incident, an
+     office changing hands on schedule — these are consequential and they are dull, and
+     they must lose to an event with a story in it. If the only thing you can say about
+     a candidate is that it was significant, it does not belong in the top ranks.
+  2. World-changing beats locally-important, ALL ELSE EQUAL. Significance is a tie-break
+     between two events that are both worth reading, never a reason to promote a dull
+     one over a vivid one.
+  3. DIVERSITY: the top 15 must span at least 3 different centuries AND 3 different
      categories. Do not stack the list with one era or one theme.
-  3. Only rank candidates that are given, by their exact ID. Never invent events.
-  4. Titles are short, vivid, specific headlines — never "An event on {date_str}".
+  4. Only rank candidates that are given, by their exact ID. Never invent events.
+  5. Titles are short, vivid, specific headlines — never "An event on {date_str}".
 
 Return ONLY this JSON (score_breakdown MUST sum to deep_score):
 {{

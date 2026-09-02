@@ -37,11 +37,25 @@ LANG_NAMES = {
 }
 
 # ── Validation thresholds ─────────────────────────────────────────────
-MIN_WORDS = 1200          # below this the generation broke or truncated → retry
+# A floor on length is a proxy for "the generation broke", and it was set where a
+# healthy Gemini answer landed. On Groq it rejects work that is merely concise: the
+# 2026-09-02 run threw away three finished long reads at 887, 909 and 981 words, and
+# two more for chapters of 100 and 108 against a 110 floor. Every one of them was a
+# complete, readable article about a good event, discarded for falling a paragraph
+# short — and discarding it costs the event its long read entirely.
+#
+# The bar is now set to catch a broken generation, not a brief one. A short long read
+# on an event worth reading beats no long read at all; the interest lives in which
+# event was chosen, not in how many words it took.
+MIN_WORDS = 800           # below this the generation genuinely broke → retry
+# What the prompt asks for, kept well above the floor on purpose. Lowering the ask along
+# with the bar would make every long read shorter; the point is to keep aiming high and
+# stop throwing away the ones that land a little under.
+TARGET_WORDS = 1400
 MAX_WORDS = 3200          # above this it is padding, not prose → retry
 MIN_CHAPTERS = 4
 MAX_CHAPTERS = 7
-MIN_CHAPTER_WORDS = 110
+MIN_CHAPTER_WORDS = 80
 MIN_SOURCES = 3
 TEASER_WORDS = 70         # opening words shipped to free users as the pitch
 MAX_OVERLAP = 0.12        # 8-gram overlap with the free narrative
@@ -174,7 +188,7 @@ A subscriber reading both must feel they received two different articles.
         return f"""
 You are writing the long-form piece for subscribers of a history app — the kind of
 article someone reads to the end on a Sunday morning and then tells someone about.
-ONE event. {MIN_WORDS}-2400 words total across all chapters. Write in English.
+ONE event. {TARGET_WORDS}-2400 words total across all chapters. Write in English.
 
 EVENT: {year} — {text}
 WIKIPEDIA: {slug}

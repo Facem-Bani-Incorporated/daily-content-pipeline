@@ -61,11 +61,16 @@ LANG_NAMES = {"ro": "Romanian", "es": "Spanish", "de": "German", "fr": "French"}
 # output, and still three real decisions deep. Eight endings is also exactly what
 # MIN_ENDINGS already called the floor worth shipping, so the collection grid keeps
 # working. Widen these back if the game ever earns the tokens.
-ROOT_BRANCH = 2      # n0
-MID_BRANCH = 2       # na, nb
-LEAF_BRANCH = 2      # naa … nbb
-TARGET_DECISIONS = 7         # 1 + 2 + 4
-TARGET_ENDINGS = 8           # 4 leaf nodes x 2
+# The opening decision is three-wide, the rest two. A game whose every choice is a
+# coin flip reads as a corridor with a fork in it; one real three-way — at the moment
+# the player is most engaged, before anything has been decided — is what makes it feel
+# like a decision rather than a toggle. Widening the root and nothing else costs one
+# extra decision node and four extra endings, which is the cheapest place to buy it.
+ROOT_BRANCH = 3      # n0 — the three-choice opening
+MID_BRANCH = 2       # na, nb, nc
+LEAF_BRANCH = 2      # naa … ncb
+TARGET_DECISIONS = 10        # 1 + 3 + 6
+TARGET_ENDINGS = 12          # 6 leaf nodes x 2
 TARGET_ACTORS = 4
 TARGET_RARE = 2
 
@@ -98,13 +103,13 @@ MIN_METER_MOVE = 8
 # genuinely hingeless days rather than the common path.
 EXTRA_CANDIDATES = 2
 
-MID_IDS = ["na", "nb"]
-LEAF_IDS = ["naa", "nab", "nba", "nbb"]
+MID_IDS = ["na", "nb", "nc"]
+LEAF_IDS = ["naa", "nab", "nba", "nbb", "nca", "ncb"]
 ENDING_IDS = ["e" + str(i) for i in range(1, TARGET_ENDINGS + 1)]
 
 # leaf -> the two endings it opens onto.
 LEAF_ENDINGS = {
-    leaf: [ENDING_IDS[i * 2], ENDING_IDS[i * 2 + 1]]
+    leaf: ENDING_IDS[i * LEAF_BRANCH:(i + 1) * LEAF_BRANCH]
     for i, leaf in enumerate(LEAF_IDS)
 }
 
@@ -318,7 +323,7 @@ class ParallelGenerator:
                 # seventy-five quotes does not fit in 16k, and on Vertex the thinking
                 # budget comes out of the same allowance. Being clipped here is the
                 # worst possible spend: full price, unusable answer.
-                max_tokens=16384,
+                max_tokens=24576,
                 thinking_budget=self.thinking_budget,
             )
             payload = self._normalize(res)
@@ -360,7 +365,7 @@ class ParallelGenerator:
                 f"Parallel {idx}:endings (attempt {attempt})",
                 {"nodes": []},
                 temperature=0.85,
-                max_tokens=16384,
+                max_tokens=24576,
                 thinking_budget=self.thinking_budget,
             )
             nodes = self._normalize({"nodes": res.get("nodes") if isinstance(res, dict) else []})["nodes"]
@@ -698,7 +703,7 @@ Return JSON with "pivot_title", "premise", "actors" and "nodes" as above, in {la
             f"Parallel {idx}:{lang}",
             {"nodes": []},
             temperature=0.3,
-            max_tokens=16384,
+            max_tokens=24576,
             thinking_budget=0,
         )
 
