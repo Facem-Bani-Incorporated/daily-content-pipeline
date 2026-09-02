@@ -29,15 +29,22 @@ logger = setup_logger("LLM")
 FALLBACK_MODEL = "gemini-flash-latest"
 
 # Per-provider wiring. `reasoning` = whether the model accepts `reasoning_effort`;
-# `idle_effort` = the effort value for non-reasoning (creative) calls. We use "low"
-# rather than "none": "low" is accepted by every Gemini flash model (some newer ones
-# reject "none") and still keeps thinking — and cost — minimal.
+# `idle_effort` = the effort value for non-reasoning (creative) calls.
+#
+# This was "low", on the reasoning that low is accepted everywhere and keeps cost
+# minimal. It does not: "low" still thinks, and thinking bills as output. Cloud
+# Billing shows it on its own line — "Gemini 2.5 Flash GA Text Output (Thinking On)"
+# — and that line was the single largest item on the invoice. Creative and mechanical
+# calls (writing an article, translating one) gain nothing from deliberation, and
+# there are far more of those than there are ranking calls.
+#
+# So: "none", with _EFFORT_FALLBACK below covering the models that reject it.
 _PROVIDERS = {
     "gemini": {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
         "key_attrs": ("GEMINI_API_KEY", "OPENAI_API_KEY"),
         "reasoning": True,
-        "idle_effort": "low",
+        "idle_effort": "none",
         "json_mode": True,  # Gemini's json_object mode is reliable → guaranteed-valid JSON
     },
     "openai": {
@@ -62,7 +69,7 @@ _PROVIDERS = {
         "base_url": None,  # built dynamically in _base_url()
         "key_attrs": (),   # token minted in _resolve_key()
         "reasoning": True,
-        "idle_effort": "low",
+        "idle_effort": "none",
         "json_mode": True,
         "vertex": True,
     },
@@ -283,6 +290,28 @@ def build_params(
     return params
 
 
+# Some models reject reasoning_effort="none" outright. Learn that once from the first
+# rejection rather than sending a doomed parameter on every later call.
+_EFFORT_FALLBACK = {"none": "low"}
+_effort_rejected: set[str] = set()
+
+
+def _is_effort_rejected(err: Exception) -> bool:
+    msg = str(err).lower()
+    return "reasoning_effort" in msg or ("thinking" in msg and "invalid" in msg)
+
+
+def _downgrade_effort(params: dict) -> dict | None:
+    """Same call with the next effort up, or None if there is nowhere to go."""
+    effort = params.get("reasoning_effort")
+    nxt = _EFFORT_FALLBACK.get(effort)
+    if not nxt:
+        return None
+    _effort_rejected.add(str(params.get("model")))
+    logger.warning(f"reasoning_effort={effort!r} rejected -> retrying with {nxt!r}")
+    return {**params, "reasoning_effort": nxt}
+
+
 def _is_model_missing(err: Exception) -> bool:
     """True if the error is a 'model not found / not supported' 404."""
     if getattr(err, "status_code", None) == 404:
@@ -374,6 +403,12 @@ async def achat(params: dict):
         _record(resp)
         return resp
     except Exception as e:
+        if _is_effort_rejected(e):
+            retry = _downgrade_effort(params)
+            if retry:
+                resp = await client.chat.completions.create(**retry)
+                _record(resp)
+                return resp
         fb = _fallback_model()
         if _is_model_missing(e) and params.get("model") != fb:
             logger.warning(f"⚠️ model {params.get('model')!r} unavailable → retrying with {fb}")
@@ -391,6 +426,12 @@ def chat(params: dict):
         _record(resp)
         return resp
     except Exception as e:
+        if _is_effort_rejected(e):
+            retry = _downgrade_effort(params)
+            if retry:
+                resp = client.chat.completions.create(**retry)
+                _record(resp)
+                return resp
         fb = _fallback_model()
         if _is_model_missing(e) and params.get("model") != fb:
             logger.warning(f"⚠️ model {params.get('model')!r} unavailable → retrying with {fb}")
