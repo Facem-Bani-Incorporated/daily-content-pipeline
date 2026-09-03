@@ -7,6 +7,7 @@ from core.llm import (
     get_async_client, build_params, parse_json_response, achat, BudgetExhausted,
 )
 from core.onthisday import fetch_otd_reference, fetch_otd
+from core.text import strip_prose_dashes
 from schema.models import EventCategory
 from core.logger import setup_logger
 
@@ -136,54 +137,51 @@ class AIProcessor:
         # ══════════════════════════════════════════════════════════
         self.narrative_voices = [
             {
-                "name": "THE_RACONTEUR",
+                "name": "THE_EXPLAINER",
                 "instruction": (
-                    "Write like the best storyteller at the dinner table: warm, confident, "
-                    "a little mischievous. Dry humor, perfect timing, the occasional aside that "
-                    "makes the reader grin. You are not lecturing — you are letting them in on "
-                    "a great story you can't wait to tell."
+                    "Explain how the thing actually worked. The mechanism, the law, the "
+                    "engineering, the chain of command. Assume an intelligent reader who "
+                    "does not know the subject. The explanation is the point of the piece."
                 ),
             },
             {
-                "name": "THE_VIVID_EYE",
+                "name": "THE_REPORTER",
                 "instruction": (
-                    "Write like a cinematographer with a pen. Sensory, concrete, immediate — "
-                    "what it looked like, sounded like, smelled like. The reader should see it, "
-                    "not be told about it. Spare, sharp images over adjectives."
+                    "Report it. Who did what, when, where, and what followed. Short "
+                    "sentences, verified facts, no atmosphere. If you cannot source a "
+                    "detail, leave it out rather than dressing the gap."
                 ),
             },
             {
-                "name": "THE_CURIOUS_MIND",
+                "name": "THE_ANALYST",
                 "instruction": (
-                    "Write like someone who just learned this and can't believe how cool it is. "
-                    "Lead the reader through the 'wait, how did that even work?' moments. "
-                    "Explain the mechanism, the trick, the science — and make the explanation "
-                    "the most satisfying part of the piece."
+                    "Trace cause and consequence. What made this possible, what it forced "
+                    "next, what it cost and who paid. Use numbers wherever they exist and "
+                    "say what they mean."
                 ),
             },
             {
-                "name": "THE_WRY_OBSERVER",
+                "name": "THE_CONTEXT_SETTER",
                 "instruction": (
-                    "Write with a raised eyebrow. Find the irony, the absurd human detail, "
-                    "the gap between what people intended and what actually happened. "
-                    "Understated, never cruel, never forced — the humor comes from the truth, "
-                    "not from jokes pasted on top."
+                    "Establish what was normal before, then what changed. The reader "
+                    "should finish knowing why this mattered at the time rather than only "
+                    "that it happened."
                 ),
             },
             {
-                "name": "THE_LITERARY_HAND",
+                "name": "THE_CORRECTOR",
                 "instruction": (
-                    "Write like a novelist who happens to be telling something true. "
-                    "Build a little tension, control the pace, let one image carry weight. "
-                    "Lyrical but never purple — every sentence still earns its place and stays clear."
+                    "Lead with what is commonly believed about this and what the record "
+                    "actually shows. Be specific about the evidence. Correct without "
+                    "smugness."
                 ),
             },
             {
-                "name": "THE_PLAINSPOKEN_GUIDE",
+                "name": "THE_DETAIL_HUNTER",
                 "instruction": (
-                    "Write crisp, direct, confident — but with a pulse. No throat-clearing, "
-                    "no fluff, every sentence does work. Personality lives in the precision and "
-                    "the well-chosen detail, not in decoration. Think great explainer, fast and clean."
+                    "Build the piece from concrete particulars: names, quantities, dates, "
+                    "distances, prices, the text of the order. Every detail checkable. No "
+                    "scene-setting that is not documented."
                 ),
             },
         ]
@@ -985,6 +983,15 @@ HOW TO WRITE IT:
 RHYTHM: Mix short punchy sentences with longer flowing ones. Present tense for the key moment,
 past tense for everything else. Vary paragraph length. If a sentence is boring, cut it.
 
+PUNCTUATION, and this one is not negotiable:
+NEVER use a dash as punctuation. No em dash, no en dash, no " - " standing in for a
+comma, a colon or a full stop. If a clause needs joining, use a comma. If it is a new
+thought, start a new sentence. A dash is only allowed inside a hyphenated compound
+(record-breaking) or a numeric range (1914-1918).
+Write to inform. Say what happened, what it meant and why it mattered, in plain
+language. No scene-setting for its own sake, no lyricism, no building atmosphere. If a
+sentence carries no fact the reader did not have, delete it.
+
 BANNED PHRASES (clichés that make every article sound the same):
 "it is worth noting" / "history tells us" / "changed the course of history" /
 "left an indelible mark" / "without a doubt" / "subsequently" / "in conclusion" /
@@ -1024,7 +1031,9 @@ Return JSON:
                 max_tokens=4096,
                 thinking_budget=0,  # creative writing gets nothing from reasoning tokens
             )
-            content = res.get("content", "")
+            # The prompt forbids dashes-as-punctuation and the model still produces
+            # them, so the rule is enforced here rather than hoped for.
+            content = strip_prose_dashes(res.get("content", ""))
             notif = self._clean_notification(
                 res.get("notification_title", ""), res.get("notification_body", "")
             )
@@ -1045,8 +1054,8 @@ Return JSON:
     @staticmethod
     def _clean_notification(title: str, body: str) -> dict:
         """Trim a generated hook to push-notification limits (best-effort)."""
-        title = (title or "").strip().strip('"')
-        body = (body or "").strip().strip('"')
+        title = strip_prose_dashes((title or "").strip().strip('"'))
+        body = strip_prose_dashes((body or "").strip().strip('"'))
         if len(title) > 45:
             title = title[:44].rstrip() + "…"
         if len(body) > 130:

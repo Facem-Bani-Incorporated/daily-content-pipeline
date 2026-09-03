@@ -21,6 +21,7 @@ import asyncio
 import re
 
 from core.llm import budget_allows
+from core.text import strip_prose_dashes
 from core.logger import setup_logger
 
 logger = setup_logger("DeepDive")
@@ -284,6 +285,15 @@ HOW TO WRITE IT:
 - Vary paragraph and sentence length. If a sentence is boring, cut it.
 - No headers inside chapter bodies. Paragraphs separated by blank lines.
 
+PUNCTUATION, and this one is not negotiable:
+NEVER use a dash as punctuation. No em dash, no en dash, no " - " standing in for a
+comma, a colon or a full stop. If a clause needs joining, use a comma. If it is a new
+thought, start a new sentence. A dash is only allowed inside a hyphenated compound
+(record-breaking) or a numeric range (1914-1918).
+Write to inform. Say what happened, what it meant and why it mattered, in plain
+language. No scene-setting for its own sake, no lyricism, no building atmosphere. If a
+sentence carries no fact the reader did not have, delete it.
+
 BANNED PHRASES:
 "it is worth noting" / "history tells us" / "changed the course of history" /
 "left an indelible mark" / "without a doubt" / "subsequently" / "in conclusion" /
@@ -392,7 +402,10 @@ Return the SAME JSON structure, with every string translated into {lang_full}:
             else:
                 title, body = "", str(ch).strip()
             if body:
-                chapters.append({"title": title, "body": body})
+                chapters.append({
+                    "title": strip_prose_dashes(title),
+                    "body": strip_prose_dashes(body),
+                })
 
         def _str_list(key: str) -> list:
             out = []
@@ -417,13 +430,19 @@ Return the SAME JSON structure, with every string translated into {lang_full}:
                 # rather than throwing away a good point over its packaging.
                 label, text = "", str(h).strip()
             if text:
-                highlights.append({"label": label, "text": text})
+                highlights.append({
+                    "label": strip_prose_dashes(label),
+                    "text": strip_prose_dashes(text),
+                })
 
         payload = {
             "chapters": chapters,
             "highlights": highlights[:MAX_HIGHLIGHTS],
             "timeline": _str_list("timeline"),
-            "misconception": str(res.get("misconception") or "").strip(),
+            # Timeline and aftermath are deliberately NOT cleaned: their dash is the
+            # separator in "14:32 — the first signal reaches Lisbon", which the app lays
+            # out around, not punctuation the model reached for.
+            "misconception": strip_prose_dashes(str(res.get("misconception") or "").strip()),
             "aftermath": _str_list("aftermath"),
             "sources": _str_list("sources"),
         }

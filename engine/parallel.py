@@ -41,6 +41,7 @@ Generated for the top events of each tier — see PARALLEL_PER_TIER in main.py.
 import asyncio
 
 from core.llm import budget_allows
+from core.text import strip_prose_dashes
 from core.logger import setup_logger
 
 logger = setup_logger("Parallel")
@@ -884,7 +885,7 @@ Return JSON with "pivot_title", "premise", "actors" and "nodes" as above, in {la
                 who = str(v.get("who") or "").strip()
                 quote = str(v.get("quote") or "").strip()
                 if mood in MOOD_SET and who and quote:
-                    out.append({"who": who, "mood": mood, "quote": quote})
+                    out.append({"who": who, "mood": mood, "quote": strip_prose_dashes(quote)})
             return out[:MAX_REACTIONS]
 
         actors = []
@@ -920,8 +921,8 @@ Return JSON with "pivot_title", "premise", "actors" and "nodes" as above, in {la
                 oc = c.get("outcome") if isinstance(c.get("outcome"), dict) else {}
                 choices.append({
                     "id": str(c.get("id") or ("c" + str(len(choices) + 1))),
-                    "label": str(c.get("label") or "").strip(),
-                    "detail": str(c.get("detail") or "").strip(),
+                    "label": strip_prose_dashes(str(c.get("label") or "").strip()),
+                    "detail": strip_prose_dashes(str(c.get("detail") or "").strip()),
                     "effects": eff(c.get("effects")),
                     "actor_effects": ae,
                     "risk": clamp(c.get("risk", 50), 0, 100),
@@ -935,12 +936,12 @@ Return JSON with "pivot_title", "premise", "actors" and "nodes" as above, in {la
             nodes.append({
                 "id": str(n["id"]).strip(),
                 "year": str(n.get("year") or "").strip(),
-                "title": str(n.get("title") or "").strip(),
-                "text": str(n.get("text") or "").strip(),
+                "title": strip_prose_dashes(str(n.get("title") or "").strip()),
+                "text": strip_prose_dashes(str(n.get("text") or "").strip()),
                 "facts": pairs(n.get("facts"), ("label", "value")),
                 "choices": choices,
-                "verdict": str(n.get("verdict") or "").strip(),
-                "epitaph": str(n.get("epitaph") or "").strip(),
+                "verdict": strip_prose_dashes(str(n.get("verdict") or "").strip()),
+                "epitaph": strip_prose_dashes(str(n.get("epitaph") or "").strip()),
                 # An unknown rarity is coerced rather than rejected: the app colours the
                 # badge by this string and anything it does not recognise silently reads
                 # as common, so making that explicit here keeps the data honest.
