@@ -237,7 +237,13 @@ class ParallelGenerator:
             # attempts, this one counts dollars. The tree is the most expensive thing the
             # pipeline builds, so it yields before the narratives do — a date with stories
             # and no game still publishes; a date with a game and no stories does not.
-            if not budget_allows(optional=True):
+            #
+            # It carries the same `results` guard as the candidate brake, and for the same
+            # reason: a day with NO game is the outcome worth spending on. Without it the
+            # cap fired after the free tier's first candidate failed on 2026-09-05, which
+            # cancelled the fall-through that EXTRA_CANDIDATES exists to provide and left
+            # the day blank — the cap saved two cents by throwing away the feature.
+            if results and not budget_allows(optional=True):
                 logger.warning(
                     f"💸 Parallel universes: stopping at {len(results)}/{want} — "
                     f"spend cap reached for optional stages"
@@ -282,9 +288,23 @@ class ParallelGenerator:
         endings_by_id = {
             e["id"]: e for e in endings if not self._node_broken(e, ending=True)
         }
-        nodes, _ = self._prune(trunk["nodes"], trunk["root"], endings_by_id, actor_ids, depth)
+        # Same ladder the trunk walks: a branch that loses its endings can cost the tree
+        # a whole level, and two decisions with the endings that did arrive beats no game
+        # at all. Without this, one unusable ending at the bottom threw away a finished
+        # trunk, both generation calls, and the day's game.
+        nodes = []
+        for d in range(depth, MIN_DEPTH - 1, -1):
+            nodes, _ = self._prune(trunk["nodes"], trunk["root"], endings_by_id, actor_ids, d)
+            if nodes:
+                if d != depth:
+                    logger.info(f"🌳 Parallel {idx} — settled at {d} decisions after the endings landed")
+                depth = d
+                break
         if not nodes:
-            logger.warning(f"⚠️ Parallel {idx} — nothing survived once the endings landed")
+            logger.warning(
+                f"⚠️ Parallel {idx} — nothing survived once the endings landed "
+                f"({len(endings_by_id)} usable endings for {len(slots)} slots)"
+            )
             return None
 
         reached = {c["next"] for n in nodes for c in n["choices"]} & set(endings_by_id)
@@ -369,11 +389,42 @@ class ParallelGenerator:
                 thinking_budget=self.thinking_budget,
             )
             nodes = self._normalize({"nodes": res.get("nodes") if isinstance(res, dict) else []})["nodes"]
-            endings = [n for n in nodes if n["id"] in slots and not n["choices"]]
+
+            # Judge them here by exactly the bar `_generate_english` will apply, or the
+            # two disagree and the disagreement is silent. That is what emptied the free
+            # tier's tree on 2026-09-05: eight endings landed on eight slots and were
+            # logged as "8/8 worlds", then every one was dropped by the caller's
+            # `_node_broken(ending=True)` for missing a verdict or an epitaph. The bottom
+            # decisions were left with nothing to open onto, fell under MIN_CHOICES, and
+            # took their parents with them all the way to the root — reported only as
+            # "nothing survived once the endings landed", with no clue which half broke.
+            endings, rejected = [], {}
+            for n in nodes:
+                if n["id"] not in slots or n["choices"]:
+                    continue
+                broken = self._node_broken(n, ending=True)
+                if broken:
+                    rejected[n["id"]] = broken
+                    continue
+                endings.append(n)
+
+            missing = set(slots) - {e["id"] for e in endings}
+            # A slot with no ending is a dead tap, so the first attempt insists on all of
+            # them. The last attempt takes what it can get: a tree pruned down to the
+            # endings that did arrive is still a game, and it is the only one on offer.
+            need_all = attempt < 2
             ok, why = self._validate_endings(endings, slots)
-            if ok:
-                logger.info(f"🌌 Parallel {idx}:endings — {len(endings)}/{len(wanted)} worlds")
+            if ok and not (need_all and missing):
+                logger.info(
+                    f"🌌 Parallel {idx}:endings — {len(endings)}/{len(wanted)} worlds"
+                    + (f" ({len(missing)} slots unfilled)" if missing else "")
+                )
                 return endings
+            if not ok and missing and not rejected:
+                why = f"{why}; {len(missing)} slots never answered"
+            elif rejected:
+                sample = ", ".join(f"{k}: {v}" for k, v in list(rejected.items())[:3])
+                why = f"{len(rejected)} of {len(rejected) + len(endings)} endings unusable — {sample}"
             logger.warning(f"⚠️ Parallel {idx}:endings attempt {attempt}: {why}")
         return None
 
@@ -605,6 +656,11 @@ tree can reach.
 {paths}
 
 FOR EACH OF THE {n_end} ENDINGS
+EVERY ONE of the {n_end} ids listed above must appear, and every ending must carry BOTH a
+`verdict` and an `epitaph`. An ending missing either is discarded, and a discarded ending
+leaves a decision in the tree opening onto nothing — which costs the whole game, not just
+that world. Return all {n_end}, complete, or the work is wasted.
+
 - `id`: exactly as listed above. `choices`: an empty array. `facts`: an empty array.
 - `year`: well after the divergence — a generation or a century later, as the world needs.
 - `title`: short. Name the world, do not summarise it.

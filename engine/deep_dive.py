@@ -47,7 +47,11 @@ LANG_NAMES = {
 # The bar is now set to catch a broken generation, not a brief one. A short long read
 # on an event worth reading beats no long read at all; the interest lives in which
 # event was chosen, not in how many words it took.
-MIN_WORDS = 800           # below this the generation genuinely broke → retry
+MIN_WORDS = 700           # below this the generation genuinely broke → retry
+
+# Marks the one validation failure that is a matter of degree rather than of kind. A
+# short article is still an article; a missing misconception or an invented URL is not.
+TOO_SHORT = "Too short"
 # What the prompt asks for, kept well above the floor on purpose. Lowering the ask along
 # with the bar would make every long read shorter; the point is to keep aiming high and
 # stop throwing away the ones that land a little under.
@@ -140,6 +144,7 @@ class DeepDiveGenerator:
         slug = item.get("slug", "")
         location = item.get("location") or "the location"
 
+        best: dict | None = None
         for attempt in range(1, 4):
             prompt = self._build_prompt(
                 year, text, slug, location, date_str, short_narrative
@@ -166,8 +171,28 @@ class DeepDiveGenerator:
                 )
                 return payload
 
+            # Length is the one failure worth keeping the loser of. Everything else the
+            # validator catches — no misconception, a fabricated URL, a placeholder
+            # phrase — makes the article wrong, and a wrong article should not ship. A
+            # short one is merely shorter than we asked for, and on 2026-09-02 and again
+            # on 09-05 that distinction cost real events their long read outright: three
+            # complete articles thrown away at 887, 909 and 981 words, and another at 762
+            # after three full generations. Keep the longest and ship it if nothing
+            # clears the bar, so the retries push for length without being able to lose
+            # the piece.
+            if reason.startswith(TOO_SHORT) and (
+                best is None or payload["word_count"] > best["word_count"]
+            ):
+                best = payload
+
             logger.warning(f"⚠️ DeepDive {idx}:en attempt {attempt}: {reason}")
 
+        if best:
+            logger.info(
+                f"✅ DeepDive {idx}:en — {best['word_count']} words, "
+                f"{len(best['chapters'])} chapters (short of {MIN_WORDS}, shipped anyway)"
+            )
+            return best
         return None
 
     def _build_prompt(
@@ -448,8 +473,6 @@ Return the SAME JSON structure, with every string translated into {lang_full}:
                 return False, f"Chapter {i} only {len(ch['body'].split())} words"
 
         wc = payload["word_count"]
-        if wc < MIN_WORDS:
-            return False, f"Too short: {wc} words (min {MIN_WORDS})"
         if wc > MAX_WORDS:
             return False, f"Too long: {wc} words (max {MAX_WORDS})"
 
@@ -472,6 +495,12 @@ Return the SAME JSON structure, with every string translated into {lang_full}:
             if marker in blob:
                 return False, f"Contains placeholder/AI text: '{marker}'"
 
+        # Deliberately the LAST check. The caller keeps a short article and ships it when
+        # nothing clears the bar, so "too short" has to mean "sound in every other way" —
+        # if this ran earlier, a piece could be held back for length while quietly also
+        # carrying an invented URL or a placeholder phrase, and then be shipped anyway.
+        if wc < MIN_WORDS:
+            return False, f"{TOO_SHORT}: {wc} words (min {MIN_WORDS})"
         if short_narrative:
             overlap = self._overlap_ratio(short_narrative, blob)
             if overlap > MAX_OVERLAP:
